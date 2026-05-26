@@ -17,25 +17,6 @@
 
 ---
 
-RX5808
-
-GPIO9  (D10) → RX5808 DATA
-
-GPIO7  (D8)  → RX5808 CLK
-
-GPIO8  (D9)  → RX5808 CS
-
-GPIO1  (D0)  ← RX5808 RSSI  (analog)
-
-3.3V         → RX5808 VCC
-
-GND          → RX5808 GND
-
-
-GPIO5 / GPIO6 still available for Heltec LoRa relay (ENABLE_MESH_RELAY 1)
-
-
-
 ## 🛠️ **Hardware Options**
 
 ### **🎯 Ready-to-Use Solution**
