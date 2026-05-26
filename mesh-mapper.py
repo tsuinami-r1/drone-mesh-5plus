@@ -806,8 +806,10 @@ def update_detection(detection):
             detection["basic_id"] = tracked_pairs[mac]["basic_id"]
         
         # Comprehensive FAA data persistence logic for no-GPS detections
+        # Skip FAA lookup for RX5808 analog FM detections — they carry no valid
+        # RemoteID that could match the FAA registration database.
         remote_id = detection.get("basic_id")
-        if mac:
+        if mac and not detection.get("_skip_faa"):
             # Exact match if basic_id provided
             if remote_id:
                 key = (mac, remote_id)
@@ -904,7 +906,7 @@ def update_detection(detection):
         detection["basic_id"] = tracked_pairs[mac]["basic_id"]
     remote_id = detection.get("basic_id")
     # Try exact cache lookup by (mac, remote_id), then fallback to any cached data for this mac, then to previous tracked_pairs entry
-    if mac:
+    if mac and not detection.get("_skip_faa"):
         # Exact match if basic_id provided
         if remote_id:
             key = (mac, remote_id)
@@ -4079,19 +4081,35 @@ def serial_reader(port):
                     if 'heartbeat' in detection:
                         logger.debug(f"Skipping heartbeat from {port}")
                         continue
-                    
+
+                    # Skip status/info messages without detection data
+                    if 'info' in detection and not any(k in detection for k in ['mac', 'drone_lat', 'pilot_lat', 'basic_id', 'remote_id']):
+                        logger.debug(f"Skipping info message from {port}: {detection}")
+                        continue
+
                     # Skip status messages without detection data
                     if not any(key in detection for key in ['mac', 'drone_lat', 'pilot_lat', 'basic_id', 'remote_id']):
                         logger.debug(f"Skipping non-detection message from {port}: {detection}")
                         continue
-                        
+
+                    # RX5808 analog FM detection — log prominently, skip FAA lookup
+                    if detection.get('type') == 'analog_fm':
+                        logger.info(
+                            f"[RX5808] Analog FM signal: "
+                            f"Band={detection.get('band','?')}{detection.get('ch','?')} "
+                            f"Freq={detection.get('freq_mhz','?')}MHz "
+                            f"RSSI_raw={detection.get('rssi_raw','?')} "
+                            f"node={detection.get('node_id','?')} port={port}"
+                        )
+                        detection['_skip_faa'] = True
+
                     # Normalize remote_id field
                     if 'remote_id' in detection and 'basic_id' not in detection:
                         detection['basic_id'] = detection['remote_id']
-                    
+
                     # Add port information for debugging
                     detection['source_port'] = port
-                    
+
                     # Process the detection
                     logger.info(f"Processing detection from {port}: MAC={detection.get('mac', 'N/A')}, "
                               f"RSSI={detection.get('rssi', 'N/A')}, "
