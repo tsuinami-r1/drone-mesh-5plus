@@ -290,6 +290,141 @@ GND       | GND
 
 ---
 
+## 📡 **RX5808 5.8GHz Analog FM Detection** (`rx5808-detection/`)
+
+Detects **analog FPV video transmitters** operating in the 5.645–5.945 GHz band.
+Where the other firmware variants look for digital RemoteID broadcasts, this module
+uses the RX5808 analog FM receiver IC to sweep all 40 standard FPV channels and
+report a signal hit whenever RSSI exceeds your calibrated threshold.
+
+> **Use case:** Spot FPV racing drones or surveillance UAVs that are broadcasting
+> analog video but may *not* carry a RemoteID transmitter.
+
+### Required Hardware
+
+| Component | Notes |
+|-----------|-------|
+| **Seeed XIAO ESP32-S3** | Same board used by other variants |
+| **RX5808 module** | 5.8GHz analog FM receiver; ~$5–10, widely available |
+| Jumper wires | 4 signal + 2 power wires |
+
+### Wiring — XIAO ESP32-S3 ↔ RX5808
+
+```
+XIAO ESP32-S3 Pin        RX5808 Pin
+──────────────────────── ──────────
+GPIO9  (D10 / MOSI)  →   DATA
+GPIO7  (D8  / SCK)   →   CLK
+GPIO8  (D9)          →   CS       (active LOW)
+GPIO1  (D0  / ADC)   ←   RSSI     (analog output)
+3.3V                 →   VCC
+GND                  →   GND
+```
+
+Optional — connect a **Heltec LoRa V3** for mesh relay (same wiring as all other
+firmware variants):
+
+```
+GPIO5 (D4) → Heltec RX
+GPIO6 (D5) ← Heltec TX
+```
+
+### Build & Flash
+
+```bash
+cd rx5808-detection
+
+# Compile
+pio run -e seeed_xiao_esp32s3
+
+# Compile and upload (XIAO connected via USB)
+pio run -e seeed_xiao_esp32s3 --target upload
+
+# Open serial monitor to verify
+pio device monitor --baud 115200
+```
+
+On power-up you should see:
+```json
+{"info":"RX5808 scanner ready","node_id":"RX01","channels":40,"threshold":1800}
+```
+
+### Configuration
+
+All tuneable constants are at the top of the relevant source files:
+
+| Constant | File | Default | Description |
+|----------|------|---------|-------------|
+| `RSSI_THRESHOLD` | `src/rx5808.h` | `1800` | ADC count (0–4095) above which a signal is reported |
+| `RSSI_SAMPLES` | `src/rx5808.h` | `10` | ADC reads averaged per measurement |
+| `TUNE_SETTLE_MS` | `src/rx5808.h` | `30` | ms to wait for RX5808 PLL after tuning |
+| `NODE_ID` | `src/main.cpp` | `"RX01"` | Change per device for multi-node dedup |
+| `ENABLE_MESH_RELAY` | `src/main.cpp` | `1` | Set `0` to disable Heltec UART relay |
+| `MIN_DWELL_HITS` | `src/main.cpp` | `2` | Consecutive reads required to confirm detection |
+| `REPORT_INTERVAL_MS` | `src/main.cpp` | `5000` | Rate-limit re-reports of the same channel |
+
+### Calibrating the RSSI Threshold
+
+1. Flash the firmware and open the serial monitor.
+2. With **no FPV transmitter powered on**, let it scan for ~30 seconds and note
+   the `rssi_raw` values in any detections.  That is your **noise floor**.
+3. Set `RSSI_THRESHOLD` to **noise floor + 200** (at minimum).  Higher values
+   reduce false positives at the cost of missing weaker signals.
+4. Re-flash, power up a known FPV transmitter nearby, and confirm detections appear.
+
+### Detection Output
+
+Each hit produces a JSON line on USB Serial (consumed by `mesh-mapper.py`):
+
+```json
+{
+  "type":     "analog_fm",
+  "mac":      "AF:00:16:1A:52:01",
+  "freq_mhz": 5658,
+  "band":     "R",
+  "ch":       1,
+  "rssi_raw": 2240,
+  "rssi":     2240,
+  "basic_id": "5.8G-R1-5658MHz",
+  "node_id":  "RX01"
+}
+```
+
+The synthetic MAC (`AF:00:…`) encodes frequency + band + channel so that
+`mesh-mapper.py` tracks each FPV channel as a distinct "device" — no two
+channels share the same identifier.
+
+If `ENABLE_MESH_RELAY` is on, a compact human-readable message is also sent to
+the Heltec relay:
+```
+AnalogFM: R1 5658MHz rssi=2240 [RX01]
+```
+
+### Integration with mesh-mapper.py
+
+No extra configuration is needed. Connect the XIAO via USB, select the port in
+the mapper UI, and analog FM detections will appear in the **no-GPS detections
+panel** alongside RemoteID detections.
+
+Differences from RemoteID detections:
+- `type: "analog_fm"` is logged prominently at INFO level with band/channel/RSSI.
+- FAA registration lookup is **skipped** (the synthetic ID cannot match the FAA DB).
+- No map marker is placed (there are no GPS coordinates from an RX5808 alone).
+
+### Channel Map
+
+All 40 channels scanned per cycle:
+
+| Band | CH1 | CH2 | CH3 | CH4 | CH5 | CH6 | CH7 | CH8 |
+|------|-----|-----|-----|-----|-----|-----|-----|-----|
+| **R (Raceband)** | 5658 | 5695 | 5732 | 5769 | 5806 | 5843 | 5880 | 5917 |
+| **A** | 5865 | 5845 | 5825 | 5805 | 5785 | 5765 | 5745 | 5725 |
+| **B** | 5733 | 5752 | 5771 | 5790 | 5809 | 5828 | 5847 | 5866 |
+| **E** | 5705 | 5685 | 5665 | 5645 | 5885 | 5905 | 5925 | 5945 |
+| **F (Fatshark)** | 5740 | 5760 | 5780 | 5800 | 5820 | 5840 | 5860 | 5880 |
+
+---
+
 ## 📊 **Performance**
 
 | Metric | Performance |
