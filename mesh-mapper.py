@@ -249,6 +249,62 @@ last_mac_by_port = {}
 serial_objs = {}
 serial_objs_lock = threading.Lock()
 
+# ============================================================
+# RX5808 Analog FM — node locations & range estimation
+# ============================================================
+NODE_LOCATIONS = {}          # {node_id: {"lat","lon","alt","source","last_updated"}}
+NODE_LOCATIONS_LOCK = threading.Lock()
+MESHTASTIC_URLS = {}         # {node_id: base_url}  — Meshtastic HTTP API roots
+MESHTASTIC_POLL_INTERVAL = 30  # seconds
+
+_FSPL_5800_DB      = 47.72   # free-space path loss constant for 5.8 GHz
+DEFAULT_TX_DBM     = 20      # assumed FPV VTX power: 100 mW = 20 dBm
+
+def _rssi_raw_to_dbm(rssi_raw):
+    """Map RX5808 12-bit ADC value → approximate received power (dBm).
+    Empirical: threshold 1800 ≈ -85 dBm, full-scale 4095 ≈ -15 dBm."""
+    v = max(0, min(4095, int(rssi_raw)))
+    return -85.0 + (v - 1800) / (4095 - 1800) * 70.0
+
+def _rssi_to_max_range_m(rssi_raw, tx_dbm=DEFAULT_TX_DBM):
+    """Estimate maximum detection radius (m) via free-space path loss at 5.8 GHz."""
+    return max(1.0, 10.0 ** ((tx_dbm - _rssi_raw_to_dbm(rssi_raw) - _FSPL_5800_DB) / 20.0))
+
+def _fetch_meshtastic_position(url):
+    """Query Meshtastic HTTP API; return first node position dict or None."""
+    try:
+        r = requests.get(f"{url.rstrip('/')}/api/v1/nodes", timeout=5)
+        if r.status_code != 200:
+            return None
+        payload = r.json()
+        nodes = payload if isinstance(payload, list) else payload.get("nodes", {})
+        if isinstance(nodes, dict):
+            nodes = list(nodes.values())
+        for node in nodes:
+            pos = node.get("position", {})
+            lat = pos.get("latitude") or (pos.get("latitudeI", 0) * 1e-7)
+            lon = pos.get("longitude") or (pos.get("longitudeI", 0) * 1e-7)
+            if lat and lon:
+                return {"lat": float(lat), "lon": float(lon),
+                        "alt": float(pos.get("altitude", 0))}
+    except Exception as exc:
+        logger.debug(f"Meshtastic poll error for {url}: {exc}")
+    return None
+
+def _meshtastic_poller():
+    """Daemon thread: refresh node GPS positions from Meshtastic HTTP API."""
+    while True:
+        with NODE_LOCATIONS_LOCK:
+            items = list(MESHTASTIC_URLS.items())
+        for node_id, url in items:
+            pos = _fetch_meshtastic_position(url)
+            if pos:
+                with NODE_LOCATIONS_LOCK:
+                    NODE_LOCATIONS[node_id] = {**pos, "source": "meshtastic",
+                                               "last_updated": time.time()}
+                logger.debug(f"Node {node_id} position refreshed: {pos}")
+        time.sleep(MESHTASTIC_POLL_INTERVAL)
+
 startup_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 # Updated detections CSV header to include faa_data.
 CSV_FILENAME = os.path.join(BASE_DIR, f"detections_{startup_timestamp}.csv")
@@ -800,7 +856,19 @@ def update_detection(detection):
         detection["last_update"] = time.time()
         # Mark as active since this is a fresh detection
         detection["status"] = "active"
-        
+
+        # Enrich RX5808 analog FM detections with node GPS + estimated range radius
+        if detection.get("type") == "analog_fm":
+            node_id = detection.get("node_id")
+            if node_id:
+                with NODE_LOCATIONS_LOCK:
+                    node_pos = NODE_LOCATIONS.get(node_id)
+                if node_pos:
+                    detection["node_lat"] = node_pos["lat"]
+                    detection["node_lon"] = node_pos["lon"]
+                    rssi_raw = detection.get("rssi_raw", detection.get("rssi", 0))
+                    detection["radius_m"] = round(_rssi_to_max_range_m(rssi_raw))
+
         # Preserve previous basic_id if new detection lacks one (same logic as GPS section)
         if not detection.get("basic_id") and mac in tracked_pairs and tracked_pairs[mac].get("basic_id"):
             detection["basic_id"] = tracked_pairs[mac]["basic_id"]
@@ -1447,6 +1515,29 @@ PORT_SELECTION_PAGE = '''
         Update Webhook
       </button>
     </div>
+    <div style="margin-top:12px; margin-bottom:4px; text-align:center; border-top:1px solid #333; padding-top:10px;">
+      <label style="font-size:16px; font-family:'Orbitron', monospace; color:#87CEEB;">RX5808 Node Location</label><br>
+      <small style="color:#888; font-family:monospace; font-size:11px;">Meshtastic URL (auto-fetch GPS) or manual lat/lon</small><br><br>
+      <input type="text" id="nodeLocNodeId" placeholder="Node ID (e.g. RX01)"
+             style="font-family:monospace; color:#87CEEB; background-color:#222; border:1px solid #FF00FF; width:48%; font-size:13px; padding:4px; box-sizing:border-box;">
+      <input type="text" id="nodeLocMeshtasticUrl" placeholder="http://meshtastic.local"
+             style="font-family:monospace; color:#87CEEB; background-color:#222; border:1px solid #FF00FF; width:48%; font-size:13px; padding:4px; box-sizing:border-box;">
+      <br><br>
+      <input type="text" id="nodeLocLat" placeholder="Lat (manual override)"
+             style="font-family:monospace; color:#aaa; background-color:#222; border:1px solid #555; width:48%; font-size:13px; padding:4px; box-sizing:border-box;">
+      <input type="text" id="nodeLocLon" placeholder="Lon (manual override)"
+             style="font-family:monospace; color:#aaa; background-color:#222; border:1px solid #555; width:48%; font-size:13px; padding:4px; box-sizing:border-box;">
+      <br><br>
+      <button onclick="setNodeMeshtasticUrl()"
+              style="border:1px solid #00aaff; background:#222; color:#00aaff; font-family:'Orbitron',monospace; font-size:12px; padding:4px 10px; cursor:pointer; border-radius:4px; margin:3px;">
+        Set Meshtastic URL
+      </button>
+      <button onclick="setNodeManualLocation()"
+              style="border:1px solid lime; background:#222; color:lime; font-family:'Orbitron',monospace; font-size:12px; padding:4px 10px; cursor:pointer; border-radius:4px; margin:3px;">
+        Set Manual Location
+      </button>
+      <div id="nodeLocStatus" style="font-family:monospace; color:#888; font-size:11px; margin-top:6px; min-height:14px;"></div>
+    </div>
     <div style="margin-top:4px; margin-bottom:4px; text-align:center;">
       <button id="beginMapping" type="submit" style="
         display: block;
@@ -1601,6 +1692,50 @@ PORT_SELECTION_PAGE = '''
         }, 300);
       }
     });
+
+    // ---- RX5808 node location helpers ----
+    function setNodeMeshtasticUrl() {
+      const nodeId = document.getElementById('nodeLocNodeId').value.trim();
+      const url    = document.getElementById('nodeLocMeshtasticUrl').value.trim();
+      const status = document.getElementById('nodeLocStatus');
+      if (!nodeId || !url) { status.textContent = 'Node ID and Meshtastic URL are required.'; status.style.color='#ff4422'; return; }
+      fetch('/api/meshtastic_url', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({node_id: nodeId, url: url})
+      })
+      .then(r => r.json())
+      .then(d => {
+        if (d.ok) {
+          const p = d.position;
+          status.textContent = p
+            ? 'Node ' + nodeId + ' GPS: ' + p.lat.toFixed(5) + ', ' + p.lon.toFixed(5)
+            : 'URL saved for ' + nodeId + ' — position not yet available';
+          status.style.color = p ? 'lime' : '#ffaa00';
+        } else { status.textContent = d.error || 'Error'; status.style.color='#ff4422'; }
+      })
+      .catch(e => { status.textContent = 'Request failed: ' + e; status.style.color='#ff4422'; });
+    }
+
+    function setNodeManualLocation() {
+      const nodeId = document.getElementById('nodeLocNodeId').value.trim();
+      const lat    = parseFloat(document.getElementById('nodeLocLat').value);
+      const lon    = parseFloat(document.getElementById('nodeLocLon').value);
+      const status = document.getElementById('nodeLocStatus');
+      if (!nodeId || isNaN(lat) || isNaN(lon)) { status.textContent = 'Node ID, lat and lon are required.'; status.style.color='#ff4422'; return; }
+      fetch('/api/node_location', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({node_id: nodeId, lat: lat, lon: lon})
+      })
+      .then(r => r.json())
+      .then(d => {
+        if (d.ok) {
+          status.textContent = 'Manual location set for ' + nodeId + ': ' + lat.toFixed(5) + ', ' + lon.toFixed(5);
+          status.style.color = 'lime';
+        } else { status.textContent = d.error || 'Error'; status.style.color='#ff4422'; }
+      })
+      .catch(e => { status.textContent = 'Request failed: ' + e; status.style.color='#ff4422'; });
+    }
+    // ---- end RX5808 helpers ----
 
     // Ensure webhook URL is included when Begin Mapping form is submitted
     document.getElementById('beginMapping').addEventListener('click', function(e) {
@@ -3118,6 +3253,8 @@ const droneMarkers = {};
 const pilotMarkers = {};
 const droneCircles = {};
 const pilotCircles = {};
+const analogFmRings = {};    // L.circle range rings for RX5808 analog FM detections
+const analogFmMarkers = {};  // node-position markers for RX5808 detections
 const dronePolylines = {};
 const pilotPolylines = {};
 const dronePathCoords = {};
@@ -3257,6 +3394,30 @@ function get_color_for_mac(mac) {
   return colorFromMac(mac);
 }
 
+// ---- RX5808 Analog FM helpers ----
+function rfRssiToColor(rssi_raw) {
+  // Strong (>= 3000) → green, medium (>= 2200) → amber, weak → red
+  if (rssi_raw >= 3000) return '#00dd44';
+  if (rssi_raw >= 2200) return '#ffaa00';
+  return '#ff4422';
+}
+
+function generateAnalogFmPopup(det) {
+  const rssi   = det.rssi_raw || det.rssi || 0;
+  const radius = det.radius_m ? Math.round(det.radius_m) : '?';
+  const ageSec = det.last_update ? Math.round(Date.now() / 1000 - det.last_update) : '?';
+  return '<div style="font-family:monospace;font-size:12px;min-width:190px;">' +
+    '<b style="color:#ff8800;">&#128225; Analog FM Signal</b><br>' +
+    '<b>Band:</b> ' + (det.band || '?') + (det.ch || '') +
+    ' &nbsp;<b>Freq:</b> ' + (det.freq_mhz || '?') + ' MHz<br>' +
+    '<b>RSSI raw:</b> ' + rssi + '<br>' +
+    '<b>Est. range:</b> ~' + radius + ' m<br>' +
+    '<b>Node:</b> ' + (det.node_id || det.mac) + '<br>' +
+    '<b>Age:</b> ' + ageSec + 's ago' +
+    '</div>';
+}
+// ---- end RX5808 helpers ----
+
 function updateComboList(data) {
   const activePlaceholder = document.getElementById("activePlaceholder");
   const inactivePlaceholder = document.getElementById("inactivePlaceholder");
@@ -3363,6 +3524,8 @@ async function updateData() {
         if (dronePolylines[mac]) { map.removeLayer(dronePolylines[mac]); delete dronePolylines[mac]; }
         if (pilotPolylines[mac]) { map.removeLayer(pilotPolylines[mac]); delete pilotPolylines[mac]; }
         if (droneBroadcastRings[mac]) { map.removeLayer(droneBroadcastRings[mac]); delete droneBroadcastRings[mac]; }
+        if (analogFmRings[mac]) { map.removeLayer(analogFmRings[mac]); delete analogFmRings[mac]; }
+        if (analogFmMarkers[mac]) { map.removeLayer(analogFmMarkers[mac]); delete analogFmMarkers[mac]; }
         delete dronePathCoords[mac];
         delete pilotPathCoords[mac];
         // Mark as inactive to enable revival popups
@@ -3421,7 +3584,38 @@ async function updateData() {
         // Reset alert state when transmission stops
         alertedNoGpsDrones.delete(mac);
       }
-      
+
+      // ---- RX5808 analog FM range ring ----
+      if (det.type === 'analog_fm' && det.node_lat && det.node_lon && det.radius_m) {
+        const ringColor = rfRssiToColor(det.rssi_raw || det.rssi || 0);
+        const popup = generateAnalogFmPopup(det);
+        if (analogFmRings[mac]) {
+          analogFmRings[mac].setLatLng([det.node_lat, det.node_lon]);
+          analogFmRings[mac].setRadius(det.radius_m);
+          analogFmRings[mac].setStyle({ color: ringColor, fillColor: ringColor });
+          if (!analogFmRings[mac].isPopupOpen()) analogFmRings[mac].setPopupContent(popup);
+        } else {
+          analogFmRings[mac] = L.circle([det.node_lat, det.node_lon], {
+            radius: det.radius_m,
+            color: ringColor,
+            fillColor: ringColor,
+            fillOpacity: 0.08,
+            weight: 2,
+            dashArray: '6, 4'
+          }).bindPopup(popup).addTo(map);
+        }
+        if (analogFmMarkers[mac]) {
+          analogFmMarkers[mac].setLatLng([det.node_lat, det.node_lon]);
+          if (!analogFmMarkers[mac].isPopupOpen()) analogFmMarkers[mac].setPopupContent(popup);
+        } else {
+          analogFmMarkers[mac] = L.marker([det.node_lat, det.node_lon], {
+            icon: createIcon('📡', ringColor),
+            pane: 'droneIconPane'
+          }).bindPopup(popup).addTo(map);
+        }
+      }
+      // ---- end analog FM ----
+
       if (!validDrone && !validPilot) continue;
       const color = get_color_for_mac(mac);
       // First detection zoom block (keep this block only)
@@ -4341,6 +4535,10 @@ def main():
     
     # Start cleanup timer to prevent memory leaks
     start_cleanup_timer()
+
+    # Start Meshtastic position poller for RX5808 analog FM range rings
+    threading.Thread(target=_meshtastic_poller, daemon=True,
+                     name="MeshtasticPoller").start()
     
     if HEADLESS_MODE:
         logger.info("Running in headless mode - press Ctrl+C to stop")
@@ -4605,6 +4803,57 @@ def api_get_webhook_url():
 @app.route('/api/webhook_url', methods=['GET'])
 def api_webhook_url():
     return jsonify({"webhook_url": WEBHOOK_URL or ""})
+
+# ============================================================
+# RX5808 Node Location & Meshtastic URL API
+# ============================================================
+
+@app.route('/api/node_location', methods=['GET', 'POST'])
+def api_node_location():
+    """GET: return all known node locations.
+       POST: set a manual location for a node (body: {node_id, lat, lon, alt?})."""
+    if request.method == 'GET':
+        with NODE_LOCATIONS_LOCK:
+            return jsonify(dict(NODE_LOCATIONS))
+    data = request.get_json(force=True) or {}
+    node_id = str(data.get('node_id', '')).strip()
+    if not node_id:
+        return jsonify({'error': 'node_id required'}), 400
+    try:
+        entry = {
+            'lat': float(data['lat']),
+            'lon': float(data['lon']),
+            'alt': float(data.get('alt', 0)),
+            'source': 'manual',
+            'last_updated': time.time(),
+        }
+    except (KeyError, ValueError) as exc:
+        return jsonify({'error': f'lat and lon required: {exc}'}), 400
+    with NODE_LOCATIONS_LOCK:
+        NODE_LOCATIONS[node_id] = entry
+    logger.info(f"Manual node location set: {node_id} → {entry}")
+    return jsonify({'ok': True})
+
+@app.route('/api/meshtastic_url', methods=['GET', 'POST'])
+def api_meshtastic_url():
+    """GET: return configured Meshtastic URLs.
+       POST: set Meshtastic HTTP API URL for a node and eagerly fetch its position.
+             Body: {node_id, url}"""
+    if request.method == 'GET':
+        return jsonify(dict(MESHTASTIC_URLS))
+    data = request.get_json(force=True) or {}
+    node_id = str(data.get('node_id', '')).strip()
+    url     = str(data.get('url', '')).strip().rstrip('/')
+    if not node_id or not url:
+        return jsonify({'error': 'node_id and url required'}), 400
+    MESHTASTIC_URLS[node_id] = url
+    pos = _fetch_meshtastic_position(url)
+    if pos:
+        with NODE_LOCATIONS_LOCK:
+            NODE_LOCATIONS[node_id] = {**pos, 'source': 'meshtastic',
+                                       'last_updated': time.time()}
+    logger.info(f"Meshtastic URL configured: {node_id} → {url}  pos={pos}")
+    return jsonify({'ok': True, 'position': pos})
 
 # --- Webhook URL Persistence ---
 WEBHOOK_URL_FILE = os.path.join(BASE_DIR, "webhook_url.json")
