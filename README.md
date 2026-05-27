@@ -17,49 +17,11 @@
 
 ---
 
-## 🛠️ **Hardware Options**
-
-### **🎯 Ready-to-Use Solution**
-Pre-built detection hardware designed specifically for this project:
-
-<a href="https://www.tindie.com/stores/colonel_panic/?ref=offsite_badges&utm_source=sellers_colonel_panic&utm_medium=badges&utm_campaign=badge_large">
-    <img src="https://d2ss6ovg47m0r5.cloudfront.net/badges/tindie-larges.png" alt="I sell on Tindie" width="200" height="104">
-</a>
-
-**✅ Complete kits with all components included**  
-**✅ Pre-flashed firmware ready to use**  
-
-
-**🔋 Completely Standalone Operation**
-- **No Raspberry Pi Required**: Boards operate independently for mesh detection
-- **No Computer Needed**: Self-contained drone detection and mesh communication
-- **Instant Setup**: Just power on and start detecting
-
-**📊 Optional Mapper Integration**
-- **Standalone mesh detection** works great on its own
-- **Add the mapper software** for enhanced visualization and logging
-- **Best of both worlds**: Mesh detection + centralized monitoring
-
-### **🔧 DIY Build Option**
-
-Build your own detection system using readily available components:
-
-**Required Components:**
-- **Xiao ESP32-S3** (dual-core with WiFi + Bluetooth)
-- **Heltec WiFi LoRa 32 V3** (for mesh networking)
-- Basic wiring connections
-
-**Perfect for:**
-- Learning and experimentation
-- Custom modifications
-- Budget-conscious builds
-- Educational projects
-
----
-
 ## 🎯 **Overview**
 
 Advanced drone detection system that captures and maps Remote ID broadcasts from drones using ESP32 hardware. Features real-time web interface, persistent tracking across sessions, and comprehensive data export capabilities.
+
+Original code by Luke Switzer and ColonelPanic. Currently prototyping RX5808 integration for analog 5ghz FM scanning.
 
 ---
 
