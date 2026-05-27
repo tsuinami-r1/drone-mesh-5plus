@@ -6,3 +6,7 @@
 *.vscode/
 
 node-mode-dualcore/.pio/build/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
