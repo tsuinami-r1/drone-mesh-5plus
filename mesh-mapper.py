@@ -295,7 +295,7 @@ def _meshtastic_poller():
     """Daemon thread: refresh node GPS positions from Meshtastic HTTP API."""
     while True:
         with NODE_LOCATIONS_LOCK:
-            items = list(MESHTASTIC_URLS.items())
+            items = list(MESHTASTIC_URLS.items())  # snapshot under lock
         for node_id, url in items:
             pos = _fetch_meshtastic_position(url)
             if pos:
@@ -845,6 +845,10 @@ def update_detection(detection):
         return
     prev = tracked_pairs.get(mac)
 
+    # Extract and remove internal routing flags before the detection
+    # is stored or emitted — they must not appear in frontend JSON.
+    skip_faa = detection.pop('_skip_faa', False)
+
     # Retrieve new drone coordinates from the detection
     new_drone_lat = detection.get("drone_lat", 0)
     new_drone_long = detection.get("drone_long", 0)
@@ -877,7 +881,7 @@ def update_detection(detection):
         # Skip FAA lookup for RX5808 analog FM detections — they carry no valid
         # RemoteID that could match the FAA registration database.
         remote_id = detection.get("basic_id")
-        if mac and not detection.get("_skip_faa"):
+        if mac and not skip_faa:
             # Exact match if basic_id provided
             if remote_id:
                 key = (mac, remote_id)
@@ -974,7 +978,7 @@ def update_detection(detection):
         detection["basic_id"] = tracked_pairs[mac]["basic_id"]
     remote_id = detection.get("basic_id")
     # Try exact cache lookup by (mac, remote_id), then fallback to any cached data for this mac, then to previous tracked_pairs entry
-    if mac and not detection.get("_skip_faa"):
+    if mac and not skip_faa:
         # Exact match if basic_id provided
         if remote_id:
             key = (mac, remote_id)
@@ -4846,7 +4850,8 @@ def api_meshtastic_url():
     url     = str(data.get('url', '')).strip().rstrip('/')
     if not node_id or not url:
         return jsonify({'error': 'node_id and url required'}), 400
-    MESHTASTIC_URLS[node_id] = url
+    with NODE_LOCATIONS_LOCK:
+        MESHTASTIC_URLS[node_id] = url
     pos = _fetch_meshtastic_position(url)
     if pos:
         with NODE_LOCATIONS_LOCK:

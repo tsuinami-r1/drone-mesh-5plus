@@ -1,7 +1,6 @@
 #include "rx5808.h"
 
-// Standard FPV bands — Raceband, A, B, E, F (40 channels total).
-// Frequencies follow the community-standard channel plan.
+// Standard FPV bands — Raceband, A, B, E, F.
 // Raceband R7 and Band F8 both land on 5880 MHz (same physical frequency).
 const FPVChannel FPV_CHANNELS[] = {
     // Raceband
@@ -20,7 +19,9 @@ const FPVChannel FPV_CHANNELS[] = {
     {5740, "F", 1}, {5760, "F", 2}, {5780, "F", 3}, {5800, "F", 4},
     {5820, "F", 5}, {5840, "F", 6}, {5860, "F", 7}, {5880, "F", 8},
 };
-const int FPV_CHANNEL_COUNT = (int)(sizeof(FPV_CHANNELS) / sizeof(FPV_CHANNELS[0]));
+// Catch mismatches between the #define and the actual array at build time.
+static_assert(sizeof(FPV_CHANNELS) / sizeof(FPV_CHANNELS[0]) == FPV_CHANNEL_COUNT,
+              "FPV_CHANNEL_COUNT does not match FPV_CHANNELS array length");
 
 // Shift 'bits' bits of 'data' out LSB-first on the bit-bang SPI bus.
 static void spi_shift_out(uint32_t data, int bits) {
@@ -43,21 +44,20 @@ void rx5808_init() {
     digitalWrite(RX5808_CLK_PIN,  LOW);
     digitalWrite(RX5808_CS_PIN,   HIGH);  // deselected
 
-    // 0–3.3V attenuation covers the full RX5808 RSSI output range
-    analogSetAttenuation(ADC_11db);
+    // Per-pin attenuation: covers the full 0–3.3V RX5808 RSSI output range.
+    analogSetPinAttenuation(RX5808_RSSI_PIN, ADC_11db);
     analogReadResolution(12);
 }
 
 void rx5808_set_frequency(uint16_t freq_mhz) {
-    // Synthesizer B register data: standard formula used by RotorHazard / Chorus RF Laptimer.
-    // Frequency range: 5645–5945 MHz.
+    // Synthesizer B register value — RotorHazard / Chorus RF Laptimer formula.
+    // Resolves to within ~1 MHz of the target, well inside FPV analog bandwidth.
     uint16_t reg_val = (freq_mhz - 479) / 2;
 
-    // 25-bit SPI word layout (LSB first):
+    // 25-bit SPI word (LSB first):
     //   bits  [3:0] = register address 0x01 (Synthesizer B)
-    //   bit   [4]   = R/W flag, 1 = write
-    //   bits [24:5] = 20-bit register data (upper 4 bits of reg_val are always 0
-    //                 for the 5.8GHz FPV band, so 16 bits are sufficient)
+    //   bit   [4]   = R/W flag (1 = write)
+    //   bits [24:5] = 20-bit register data
     uint32_t spi_word = 0x01u | (1u << 4) | ((uint32_t)reg_val << 5);
 
     digitalWrite(RX5808_CS_PIN, LOW);
@@ -73,3 +73,4 @@ int rx5808_read_rssi() {
     }
     return (int)(sum / RSSI_SAMPLES);
 }
+
