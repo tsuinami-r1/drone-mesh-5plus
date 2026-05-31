@@ -270,8 +270,12 @@ def _rssi_to_max_range_m(rssi_raw, tx_dbm=DEFAULT_TX_DBM):
     """Estimate maximum detection radius (m) via free-space path loss at 5.8 GHz."""
     return max(1.0, 10.0 ** ((tx_dbm - _rssi_raw_to_dbm(rssi_raw) - _FSPL_5800_DB) / 20.0))
 
-def _fetch_meshtastic_position(url):
-    """Query Meshtastic HTTP API; return first node position dict or None."""
+def _fetch_meshtastic_position(url, node_id=None):
+    """Query Meshtastic HTTP API; return position dict or None.
+
+    Prefers a node whose shortName or longName matches node_id (case-insensitive).
+    Falls back to the first node with a GPS fix if no name match is found.
+    """
     try:
         r = requests.get(f"{url.rstrip('/')}/api/v1/nodes", timeout=5)
         if r.status_code != 200:
@@ -280,13 +284,32 @@ def _fetch_meshtastic_position(url):
         nodes = payload if isinstance(payload, list) else payload.get("nodes", {})
         if isinstance(nodes, dict):
             nodes = list(nodes.values())
-        for node in nodes:
+
+        def _extract_pos(node):
             pos = node.get("position", {})
             lat = pos.get("latitude") or (pos.get("latitudeI", 0) * 1e-7)
             lon = pos.get("longitude") or (pos.get("longitudeI", 0) * 1e-7)
             if lat and lon:
                 return {"lat": float(lat), "lon": float(lon),
                         "alt": float(pos.get("altitude", 0))}
+            return None
+
+        # Prefer the node whose name matches NODE_ID configured in firmware
+        if node_id:
+            nid_lower = node_id.lower()
+            for node in nodes:
+                user = node.get("user", {})
+                names = {user.get("shortName", ""), user.get("longName", "")}
+                if any(n.lower() == nid_lower for n in names if n):
+                    p = _extract_pos(node)
+                    if p:
+                        return p
+
+        # Fallback: first node with a GPS fix
+        for node in nodes:
+            p = _extract_pos(node)
+            if p:
+                return p
     except Exception as exc:
         logger.debug(f"Meshtastic poll error for {url}: {exc}")
     return None
@@ -297,7 +320,7 @@ def _meshtastic_poller():
         with NODE_LOCATIONS_LOCK:
             items = list(MESHTASTIC_URLS.items())  # snapshot under lock
         for node_id, url in items:
-            pos = _fetch_meshtastic_position(url)
+            pos = _fetch_meshtastic_position(url, node_id)
             if pos:
                 with NODE_LOCATIONS_LOCK:
                     NODE_LOCATIONS[node_id] = {**pos, "source": "meshtastic",
@@ -3550,7 +3573,7 @@ async function updateData() {
       // ALSO handle no-GPS drones here in centralized popup logic
       const hasGps = validDrone || (pilotLat !== 0 && pilotLng !== 0);
       const hasRecentTransmission = det.last_update && (currentTime - det.last_update <= 5);
-      const isNoGpsDrone = !hasGps && hasRecentTransmission;
+      const isNoGpsDrone = !hasGps && hasRecentTransmission && det.type !== 'analog_fm';
       
       let shouldShowPopup = false;
       let popupIsNew = false;
