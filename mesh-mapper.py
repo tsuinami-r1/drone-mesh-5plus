@@ -423,7 +423,7 @@ def _tak_enqueue(detection):
         # RemoteID GPS drone
         drone_lat = detection.get("drone_lat", 0)
         drone_lon = detection.get("drone_long", 0)
-        if not drone_lat or not drone_lon:
+        if drone_lat == 0 and drone_lon == 0:
             return
         hae      = float(detection.get("drone_altitude", 0) or 0)
         callsign = detection.get("basic_id") or mac
@@ -458,9 +458,14 @@ def _tak_enqueue(detection):
 
 def _tak_sender():
     """Daemon thread: drain _tak_queue and multicast CoT XML over UDP."""
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
-    sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, TAK_MULTICAST_TTL)
+    def _make_sock():
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        s.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, TAK_MULTICAST_TTL)
+        return s
+
+    sock = _make_sock()
     while True:
+        msg = None
         try:
             msg = _tak_queue.get(timeout=1)
             sock.sendto(msg.encode("utf-8"),
@@ -468,7 +473,22 @@ def _tak_sender():
         except _qmod.Empty:
             pass
         except OSError as exc:
-            logger.debug(f"TAK send error: {exc}")
+            logger.warning(f"TAK send error, recreating socket: {exc}")
+            try:
+                sock.close()
+            except OSError:
+                pass
+            time.sleep(5)
+            try:
+                sock = _make_sock()
+                # Re-enqueue the failed message so it's not lost
+                if msg:
+                    try:
+                        _tak_queue.put_nowait(msg)
+                    except _qmod.Full:
+                        pass
+            except OSError as exc2:
+                logger.warning(f"TAK socket recreate failed: {exc2}")
 
 startup_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 # Updated detections CSV header to include faa_data.
@@ -1008,7 +1028,6 @@ def update_detection(detection):
     mac = detection.get("mac")
     if not mac:
         return
-    prev = tracked_pairs.get(mac)
 
     # Extract and remove internal routing flags before the detection
     # is stored or emitted — they must not appear in frontend JSON.
@@ -1020,7 +1039,7 @@ def update_detection(detection):
     valid_drone = (new_drone_lat != 0 and new_drone_long != 0)
 
     if not valid_drone:
-        print(f"No-GPS detection for {mac}; forwarding for processing.")
+        logger.debug(f"No-GPS detection for {mac}; forwarding for processing.")
         # Set last_update for no-GPS detections so they can be tracked for timeout
         detection["last_update"] = time.time()
         # Mark as active since this is a fresh detection
@@ -1177,7 +1196,7 @@ def update_detection(detection):
         pass
     _tak_enqueue(detection)
     detection_history.append(detection.copy())
-    print("Updated tracked_pairs:", tracked_pairs)
+    logger.debug(f"Updated tracked_pairs for {mac}")
     with open(CSV_FILENAME, mode='a', newline='') as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=[
             'timestamp', 'alias', 'mac', 'rssi', 'drone_lat', 'drone_long',
