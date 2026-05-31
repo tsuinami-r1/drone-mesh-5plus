@@ -5,6 +5,8 @@ import csv
 import logging
 import colorsys
 import threading
+import socket
+import queue as _qmod
 import requests
 import urllib3
 import serial
@@ -12,7 +14,7 @@ import serial.tools.list_ports
 import signal
 import sys
 import argparse
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, List
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -327,6 +329,146 @@ def _meshtastic_poller():
                                                "last_updated": time.time()}
                 logger.debug(f"Node {node_id} position refreshed: {pos}")
         time.sleep(MESHTASTIC_POLL_INTERVAL)
+
+# ============================================================
+# TAK / ATAK CoT Multicast Output (no external dependencies)
+# ============================================================
+TAK_ENABLE           = True
+TAK_MULTICAST_ADDR   = "239.2.3.1"
+TAK_MULTICAST_PORT   = 6969
+TAK_MULTICAST_TTL    = 32       # hops; 32 reaches LAN + local WAN segments
+TAK_STALE_DRONE_S    = 120      # seconds before ATAK evicts a drone/pilot marker
+TAK_STALE_ANALOG_S   = 60       # analog FM rings have faster re-report (~5 s)
+
+_tak_queue = _qmod.Queue(maxsize=500)
+
+def _cot_ts(dt):
+    return dt.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+
+def _cot_event(uid, cot_type, lat, lon, hae, stale_s, callsign, remarks,
+               extra_detail=""):
+    now   = datetime.now(timezone.utc)
+    stale = now + timedelta(seconds=stale_s)
+    cs    = callsign.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    rm    = remarks.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        f'<event version="2.0" uid="{uid}" type="{cot_type}"'
+        f' time="{_cot_ts(now)}" start="{_cot_ts(now)}"'
+        f' stale="{_cot_ts(stale)}" how="m-g">'
+        f'<point lat="{lat:.7f}" lon="{lon:.7f}"'
+        f' hae="{hae:.1f}" ce="35.0" le="9999999.0"/>'
+        f'<detail><contact callsign="{cs}"/>'
+        f'<remarks>{rm}</remarks>{extra_detail}</detail>'
+        '</event>'
+    )
+
+def _tak_enqueue(detection):
+    """Build and queue CoT events for a fully-enriched detection dict."""
+    if not TAK_ENABLE:
+        return
+    det_type = detection.get("type")
+    mac      = detection.get("mac", "")
+    uid_base = mac.replace(":", "")
+
+    if det_type == "analog_fm":
+        lat      = detection.get("node_lat")
+        lon      = detection.get("node_lon")
+        if not (lat and lon):
+            return
+        radius_m = detection.get("radius_m")
+        band     = detection.get("band", "?")
+        ch       = detection.get("ch", "?")
+        freq     = detection.get("freq_mhz", "?")
+        rssi     = detection.get("rssi_raw", detection.get("rssi", "?"))
+        node_id  = detection.get("node_id", "?")
+        callsign = f"5.8G-{band}{ch}-{freq}MHz"
+        remarks  = f"Analog FM {freq}MHz RSSI={rssi} node={node_id}"
+
+        # Point marker at the node (sensor) position
+        try:
+            _tak_queue.put_nowait(_cot_event(
+                uid=f"ANALOGFM-{uid_base}",
+                cot_type="a-u-G-E-S",       # unknown ground electronic sensor
+                lat=float(lat), lon=float(lon), hae=0.0,
+                stale_s=TAK_STALE_ANALOG_S,
+                callsign=callsign, remarks=remarks
+            ))
+        except _qmod.Full:
+            pass
+
+        # Estimated range ring as a circle shape
+        if radius_m:
+            ring_extra = (
+                f'<shape><ellipse major="{radius_m}" minor="{radius_m}"'
+                f' angle="0"/></shape>'
+                '<strokeColor value="-256"/>'         # ARGB 0xFFFFFF00 = yellow
+                '<fillColor value="587202560"/>'      # ARGB 0x23FFFF00 = transparent yellow
+                '<strokeWeight value="2.0"/>'
+            )
+            try:
+                _tak_queue.put_nowait(_cot_event(
+                    uid=f"ANALOGFM-RING-{uid_base}",
+                    cot_type="u-r-b-c-c",             # user-defined range/bearing circle
+                    lat=float(lat), lon=float(lon), hae=0.0,
+                    stale_s=TAK_STALE_ANALOG_S,
+                    callsign=f"{callsign} ~{radius_m}m",
+                    remarks=remarks,
+                    extra_detail=ring_extra
+                ))
+            except _qmod.Full:
+                pass
+
+    else:
+        # RemoteID GPS drone
+        drone_lat = detection.get("drone_lat", 0)
+        drone_lon = detection.get("drone_long", 0)
+        if not drone_lat or not drone_lon:
+            return
+        hae      = float(detection.get("drone_altitude", 0) or 0)
+        callsign = detection.get("basic_id") or mac
+        rssi     = detection.get("rssi", "?")
+        remarks  = f"RemoteID MAC:{mac} RSSI:{rssi}"
+        try:
+            _tak_queue.put_nowait(_cot_event(
+                uid=f"DRONE-{uid_base}",
+                cot_type="a-u-A-M-F-U-M",    # unknown unmanned aircraft
+                lat=float(drone_lat), lon=float(drone_lon), hae=hae,
+                stale_s=TAK_STALE_DRONE_S,
+                callsign=callsign, remarks=remarks
+            ))
+        except _qmod.Full:
+            pass
+
+        # Pilot location if present
+        pilot_lat = detection.get("pilot_lat", 0)
+        pilot_lon = detection.get("pilot_long", 0)
+        if pilot_lat and pilot_lon:
+            try:
+                _tak_queue.put_nowait(_cot_event(
+                    uid=f"PILOT-{uid_base}",
+                    cot_type="a-u-G-U-C-F",   # unknown ground combatant (foot)
+                    lat=float(pilot_lat), lon=float(pilot_lon), hae=0.0,
+                    stale_s=TAK_STALE_DRONE_S,
+                    callsign=f"{callsign}-PILOT",
+                    remarks=f"Pilot for {callsign} MAC:{mac}"
+                ))
+            except _qmod.Full:
+                pass
+
+def _tak_sender():
+    """Daemon thread: drain _tak_queue and multicast CoT XML over UDP."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+    sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, TAK_MULTICAST_TTL)
+    while True:
+        try:
+            msg = _tak_queue.get(timeout=1)
+            sock.sendto(msg.encode("utf-8"),
+                        (TAK_MULTICAST_ADDR, TAK_MULTICAST_PORT))
+        except _qmod.Empty:
+            pass
+        except OSError as exc:
+            logger.debug(f"TAK send error: {exc}")
 
 startup_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 # Updated detections CSV header to include faa_data.
@@ -981,6 +1123,7 @@ def update_detection(detection):
         except Exception:
             pass
         
+        _tak_enqueue(detection)
         # Cache FAA data even for no-GPS
         if detection.get('basic_id'):
             write_to_faa_cache(mac, detection['basic_id'], detection.get('faa_data', {}))
@@ -1032,6 +1175,7 @@ def update_detection(detection):
         socketio.emit('detection', detection, )
     except Exception:
         pass
+    _tak_enqueue(detection)
     detection_history.append(detection.copy())
     print("Updated tracked_pairs:", tracked_pairs)
     with open(CSV_FILENAME, mode='a', newline='') as csvfile:
@@ -4566,6 +4710,12 @@ def main():
     # Start Meshtastic position poller for RX5808 analog FM range rings
     threading.Thread(target=_meshtastic_poller, daemon=True,
                      name="MeshtasticPoller").start()
+    threading.Thread(target=_tak_sender, daemon=True,
+                     name="TAKSender").start()
+    logger.info(
+        f"TAK multicast output {'enabled' if TAK_ENABLE else 'disabled'} "
+        f"→ {TAK_MULTICAST_ADDR}:{TAK_MULTICAST_PORT}"
+    )
     
     if HEADLESS_MODE:
         logger.info("Running in headless mode - press Ctrl+C to stop")
