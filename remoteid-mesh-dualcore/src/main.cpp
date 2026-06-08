@@ -13,6 +13,7 @@
 #include <nvs_flash.h>
 #include "opendroneid.h"
 #include "odid_wifi.h"
+#include "dji_droneid.h"
 #include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -240,50 +241,64 @@ void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
   }
   else if (payload[0] == 0x80) {
     int offset = 36;
-    while (offset < length) {
+    while (offset + 1 < length) {
       int typ = payload[offset];
       int len = payload[offset + 1];
-      if ((typ == 0xdd) &&
-          (((payload[offset + 2] == 0x90 && payload[offset + 3] == 0x3a && payload[offset + 4] == 0xe6)) ||
-           ((payload[offset + 2] == 0xfa && payload[offset + 3] == 0x0b && payload[offset + 4] == 0xbc)))) {
-        int j = offset + 7;
-        if (j < length) {
-          memset(&UAS_data, 0, sizeof(UAS_data));
-          odid_message_process_pack(&UAS_data, &payload[j], length - j);
-          
-          id_data UAV;
-          memset(&UAV, 0, sizeof(UAV));
-          memcpy(UAV.mac, &payload[10], 6);
-          UAV.rssi = packet->rx_ctrl.rssi;
-          UAV.last_seen = millis();
-          
-          if (UAS_data.BasicIDValid[0]) {
-            strncpy(UAV.uav_id, (char *)UAS_data.BasicID[0].UASID, ODID_ID_SIZE);
+      if (offset + 2 + len > length) break;
+      if (typ == 0xdd && len >= 4) {
+        /* DJI DroneID OUI 26:37:12 */
+        if (payload[offset+2] == 0x26 && payload[offset+3] == 0x37 && payload[offset+4] == 0x12) {
+          dji_droneid_t dji;
+          uint8_t src_mac[6];
+          memcpy(src_mac, &payload[10], 6);
+          if (dji_parse_droneid(&payload[offset + 5], len - 3, &dji)) {
+            char djijson[384];
+            dji_emit_json(src_mac, packet->rx_ctrl.rssi, &dji, djijson, sizeof(djijson));
+            Serial.println(djijson);
           }
-          if (UAS_data.LocationValid) {
-            UAV.lat_d = UAS_data.Location.Latitude;
-            UAV.long_d = UAS_data.Location.Longitude;
-            UAV.altitude_msl = (int)UAS_data.Location.AltitudeGeo;
-            UAV.height_agl = (int)UAS_data.Location.Height;
-            UAV.speed = (int)UAS_data.Location.SpeedHorizontal;
-            UAV.heading = (int)UAS_data.Location.Direction;
-          }
-          if (UAS_data.SystemValid) {
-            UAV.base_lat_d = UAS_data.System.OperatorLatitude;
-            UAV.base_long_d = UAS_data.System.OperatorLongitude;
-          }
-          if (UAS_data.OperatorIDValid) {
-            strncpy(UAV.op_id, (char *)UAS_data.OperatorID.OperatorId, ODID_ID_SIZE);
-          }
-          
-          id_data* storedUAV = next_uav(UAV.mac);
-          *storedUAV = UAV;
-          storedUAV->flag = 1;
-          {
-            id_data tmp = *storedUAV;
-            BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-            xQueueSendFromISR(printQueue, &tmp, &xHigherPriorityTaskWoken);
-            if (xHigherPriorityTaskWoken) portYIELD_FROM_ISR();
+        }
+        /* OpenDroneID OUIs FA:0B:BC and 90:3A:E6 */
+        else if (((payload[offset+2] == 0x90 && payload[offset+3] == 0x3a && payload[offset+4] == 0xe6)) ||
+                 ((payload[offset+2] == 0xfa && payload[offset+3] == 0x0b && payload[offset+4] == 0xbc))) {
+          int j = offset + 7;
+          if (j < length) {
+            memset(&UAS_data, 0, sizeof(UAS_data));
+            odid_message_process_pack(&UAS_data, &payload[j], length - j);
+
+            id_data UAV;
+            memset(&UAV, 0, sizeof(UAV));
+            memcpy(UAV.mac, &payload[10], 6);
+            UAV.rssi = packet->rx_ctrl.rssi;
+            UAV.last_seen = millis();
+
+            if (UAS_data.BasicIDValid[0]) {
+              strncpy(UAV.uav_id, (char *)UAS_data.BasicID[0].UASID, ODID_ID_SIZE);
+            }
+            if (UAS_data.LocationValid) {
+              UAV.lat_d = UAS_data.Location.Latitude;
+              UAV.long_d = UAS_data.Location.Longitude;
+              UAV.altitude_msl = (int)UAS_data.Location.AltitudeGeo;
+              UAV.height_agl = (int)UAS_data.Location.Height;
+              UAV.speed = (int)UAS_data.Location.SpeedHorizontal;
+              UAV.heading = (int)UAS_data.Location.Direction;
+            }
+            if (UAS_data.SystemValid) {
+              UAV.base_lat_d = UAS_data.System.OperatorLatitude;
+              UAV.base_long_d = UAS_data.System.OperatorLongitude;
+            }
+            if (UAS_data.OperatorIDValid) {
+              strncpy(UAV.op_id, (char *)UAS_data.OperatorID.OperatorId, ODID_ID_SIZE);
+            }
+
+            id_data* storedUAV = next_uav(UAV.mac);
+            *storedUAV = UAV;
+            storedUAV->flag = 1;
+            {
+              id_data tmp = *storedUAV;
+              BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+              xQueueSendFromISR(printQueue, &tmp, &xHigherPriorityTaskWoken);
+              if (xHigherPriorityTaskWoken) portYIELD_FROM_ISR();
+            }
           }
         }
       }

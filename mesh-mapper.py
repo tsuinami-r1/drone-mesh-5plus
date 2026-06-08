@@ -18,8 +18,6 @@ import sys
 import argparse
 from datetime import datetime, timedelta, timezone
 from typing import Optional, List
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 from flask import Flask, request, jsonify, redirect, url_for, render_template, render_template_string, send_file
 from flask_socketio import SocketIO, emit
 from collections import deque
@@ -64,7 +62,6 @@ SHUTDOWN_EVENT = threading.Event()
 # Performance Optimizations
 # ----------------------
 MAX_DETECTION_HISTORY = 1000  # Limit detection history size
-MAX_FAA_CACHE_SIZE = 500      # Limit FAA cache size
 KML_GENERATION_INTERVAL = 30  # Only regenerate KML every 30 seconds
 last_kml_generation = 0
 last_cumulative_kml_generation = 0
@@ -87,12 +84,6 @@ def cleanup_old_detections():
                       if current_time - c.get("last_update", 0) > TAK_CONTACT_STALE_S]
         for uid in stale_uids:
             del tak_contacts[uid]
-
-    # Only clean up FAA cache, but keep drone detections for session persistence
-    if len(FAA_CACHE) > MAX_FAA_CACHE_SIZE:
-        keys_to_remove = list(FAA_CACHE.keys())[:100]
-        for key in keys_to_remove:
-            del FAA_CACHE[key]
 
 def start_cleanup_timer():
     """Start periodic cleanup every 5 minutes"""
@@ -192,18 +183,6 @@ def emit_cumulative_log():
         socketio.emit('cumulative_log', get_cumulative_log_for_emit(), )
     except Exception as e:
         logger.debug(f"Error emitting cumulative log: {e}")
-
-def emit_faa_cache():
-    try:
-        # Convert FAA_CACHE to JSON-serializable format
-        serializable_cache = {}
-        for key, value in FAA_CACHE.items():
-            # Convert tuple keys to strings
-            str_key = str(key) if isinstance(key, tuple) else key
-            serializable_cache[str_key] = value
-        socketio.emit('faa_cache', serializable_cache, )
-    except Exception as e:
-        logger.debug(f"Error emitting FAA cache: {e}")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -599,10 +578,8 @@ def _tak_receiver():
                 logger.warning(f"TAK recv socket recreate failed: {exc2}")
 
 startup_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-# Updated detections CSV header to include faa_data.
 CSV_FILENAME = os.path.join(BASE_DIR, f"detections_{startup_timestamp}.csv")
 KML_FILENAME = os.path.join(BASE_DIR, f"detections_{startup_timestamp}.kml")
-FAA_LOG_FILENAME = os.path.join(BASE_DIR, "faa_log.csv")  # FAA log CSV remains basic
 
 # Cumulative KML file for all detections
 CUMULATIVE_KML_FILENAME = os.path.join(BASE_DIR, "cumulative.kml")
@@ -619,7 +596,7 @@ if not os.path.exists(CUMULATIVE_KML_FILENAME):
 with open(CSV_FILENAME, mode='w', newline='') as csvfile:
     fieldnames = [
         'timestamp', 'alias', 'mac', 'rssi', 'drone_lat', 'drone_long',
-        'drone_altitude', 'pilot_lat', 'pilot_long', 'basic_id', 'faa_data'
+        'drone_altitude', 'pilot_lat', 'pilot_long', 'basic_id'
     ]
     writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
     writer.writeheader()
@@ -631,15 +608,8 @@ if not os.path.exists(CUMULATIVE_CSV_FILENAME):
     with open(CUMULATIVE_CSV_FILENAME, mode='w', newline='') as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=[
             'timestamp', 'alias', 'mac', 'rssi', 'drone_lat', 'drone_long',
-            'drone_altitude', 'pilot_lat', 'pilot_long', 'basic_id', 'faa_data'
+            'drone_altitude', 'pilot_lat', 'pilot_long', 'basic_id'
         ])
-        writer.writeheader()
-
-# Create FAA log CSV with header if not exists.
-if not os.path.exists(FAA_LOG_FILENAME):
-    with open(FAA_LOG_FILENAME, mode='w', newline='') as csvfile:
-        fieldnames = ['timestamp', 'mac', 'remote_id', 'faa_response']
-        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         writer.writeheader()
 
 # --- Alias Persistence ---
@@ -832,7 +802,6 @@ def start_websocket_broadcaster():
                     
                     if int(time.time()) % 30 == 0:  # Every 30 seconds
                         emit_cumulative_log()
-                        emit_faa_cache()
             except Exception as e:
                 # Ignore errors if no clients connected
                 pass
@@ -849,42 +818,7 @@ def start_websocket_broadcaster():
     logger.info("WebSocket broadcaster thread started")
 
 # ----------------------
-# FAA Cache Persistence
-# ----------------------
-FAA_CACHE_FILENAME = os.path.join(BASE_DIR, "faa_cache.csv")
-FAA_CACHE = {}
-
-# Load FAA cache from disk if it exists
-if os.path.exists(FAA_CACHE_FILENAME):
-    try:
-        with open(FAA_CACHE_FILENAME, newline='') as csvfile:
-            reader = csv.DictReader(csvfile)
-            for row in reader:
-                key = (row['mac'], row['remote_id'])
-                FAA_CACHE[key] = json.loads(row['faa_response'])
-    except Exception as e:
-        print("Error loading FAA cache:", e)
-
-def write_to_faa_cache(mac, remote_id, faa_data):
-    key = (mac, remote_id)
-    FAA_CACHE[key] = faa_data
-    try:
-        file_exists = os.path.isfile(FAA_CACHE_FILENAME)
-        with open(FAA_CACHE_FILENAME, "a", newline='') as csvfile:
-            fieldnames = ["mac", "remote_id", "faa_response"]
-            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-            if not file_exists:
-                writer.writeheader()
-            writer.writerow({
-                "mac": mac,
-                "remote_id": remote_id,
-                "faa_response": json.dumps(faa_data)
-            })
-    except Exception as e:
-        print("Error writing to FAA cache:", e)
-
-# ----------------------
-# KML Generation (including FAA data)
+# KML Generation
 # ----------------------
 def generate_kml():
     # Build sorted list of all MACs seen so far
@@ -1169,29 +1103,6 @@ def update_detection(detection):
         if not detection.get("basic_id") and mac in tracked_pairs and tracked_pairs[mac].get("basic_id"):
             detection["basic_id"] = tracked_pairs[mac]["basic_id"]
         
-        # Comprehensive FAA data persistence logic for no-GPS detections
-        # Skip FAA lookup for RX5808 analog FM detections — they carry no valid
-        # RemoteID that could match the FAA registration database.
-        remote_id = detection.get("basic_id")
-        if mac and not skip_faa:
-            # Exact match if basic_id provided
-            if remote_id:
-                key = (mac, remote_id)
-                if key in FAA_CACHE:
-                    detection["faa_data"] = FAA_CACHE[key]
-            # Fallback: any cached FAA data for this mac (regardless of basic_id)
-            if "faa_data" not in detection:
-                for (c_mac, _), faa_data in FAA_CACHE.items():
-                    if c_mac == mac:
-                        detection["faa_data"] = faa_data
-                        break
-            # Fallback: last known FAA data in tracked_pairs
-            if "faa_data" not in detection and mac in tracked_pairs and "faa_data" in tracked_pairs[mac]:
-                detection["faa_data"] = tracked_pairs[mac]["faa_data"]
-            # Always cache FAA data by MAC and current basic_id for future lookups
-            if "faa_data" in detection:
-                write_to_faa_cache(mac, detection.get("basic_id", ""), detection["faa_data"])
-        
         # Forward this no-GPS detection to the client
         tracked_pairs[mac] = detection
         detection_history.append(detection.copy())
@@ -1205,7 +1116,7 @@ def update_detection(detection):
         with open(CSV_FILENAME, mode='a', newline='') as csvfile:
             writer = csv.DictWriter(csvfile, fieldnames=[
                 'timestamp', 'alias', 'mac', 'rssi', 'drone_lat', 'drone_long',
-                'drone_altitude', 'pilot_lat', 'pilot_long', 'basic_id', 'faa_data'
+                'drone_altitude', 'pilot_lat', 'pilot_long', 'basic_id'
             ])
             writer.writerow({
                 'timestamp': datetime.now().isoformat(),
@@ -1217,15 +1128,14 @@ def update_detection(detection):
                 'drone_altitude': detection.get('drone_altitude', ''),
                 'pilot_lat': detection.get('pilot_lat', ''),
                 'pilot_long': detection.get('pilot_long', ''),
-                'basic_id': detection.get('basic_id', ''),
-                'faa_data': json.dumps(detection.get('faa_data', {}))
+                'basic_id': detection.get('basic_id', '')
             })
 
         # Append to cumulative CSV for no-GPS
         with open(CUMULATIVE_CSV_FILENAME, mode='a', newline='') as csvfile:
             writer = csv.DictWriter(csvfile, fieldnames=[
                 'timestamp', 'alias', 'mac', 'rssi', 'drone_lat', 'drone_long',
-                'drone_altitude', 'pilot_lat', 'pilot_long', 'basic_id', 'faa_data'
+                'drone_altitude', 'pilot_lat', 'pilot_long', 'basic_id'
             ])
             writer.writerow({
                 'timestamp': datetime.now().isoformat(),
@@ -1237,23 +1147,18 @@ def update_detection(detection):
                 'drone_altitude': detection.get('drone_altitude', ''),
                 'pilot_lat': detection.get('pilot_lat', ''),
                 'pilot_long': detection.get('pilot_long', ''),
-                'basic_id': detection.get('basic_id', ''),
-                'faa_data': json.dumps(detection.get('faa_data', {}))
+                'basic_id': detection.get('basic_id', '')
             })
         # Regenerate full cumulative KML
         generate_cumulative_kml_throttled()
         generate_kml_throttled()
-        
+
         # Reduce WebSocket emissions - only emit detection, not all data types
         try:
             socketio.emit('detection', detection, )
         except Exception:
             pass
-        
         _tak_enqueue(detection)
-        # Cache FAA data even for no-GPS
-        if detection.get('basic_id'):
-            write_to_faa_cache(mac, detection['basic_id'], detection.get('faa_data', {}))
         return
 
     # Otherwise, use the provided non-zero coordinates.
@@ -1269,26 +1174,6 @@ def update_detection(detection):
     # Preserve previous basic_id if new detection lacks one
     if not detection.get("basic_id") and mac in tracked_pairs and tracked_pairs[mac].get("basic_id"):
         detection["basic_id"] = tracked_pairs[mac]["basic_id"]
-    remote_id = detection.get("basic_id")
-    # Try exact cache lookup by (mac, remote_id), then fallback to any cached data for this mac, then to previous tracked_pairs entry
-    if mac and not skip_faa:
-        # Exact match if basic_id provided
-        if remote_id:
-            key = (mac, remote_id)
-            if key in FAA_CACHE:
-                detection["faa_data"] = FAA_CACHE[key]
-        # Fallback: any cached FAA data for this mac
-        if "faa_data" not in detection:
-            for (c_mac, _), faa_data in FAA_CACHE.items():
-                if c_mac == mac:
-                    detection["faa_data"] = faa_data
-                    break
-        # Fallback: last known FAA data in tracked_pairs
-        if "faa_data" not in detection and mac in tracked_pairs and "faa_data" in tracked_pairs[mac]:
-            detection["faa_data"] = tracked_pairs[mac]["faa_data"]
-        # Always cache FAA data by MAC and current basic_id for fallback
-        if "faa_data" in detection:
-            write_to_faa_cache(mac, detection.get("basic_id", ""), detection["faa_data"])
 
     tracked_pairs[mac] = detection
     
@@ -1308,7 +1193,7 @@ def update_detection(detection):
     with open(CSV_FILENAME, mode='a', newline='') as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=[
             'timestamp', 'alias', 'mac', 'rssi', 'drone_lat', 'drone_long',
-            'drone_altitude', 'pilot_lat', 'pilot_long', 'basic_id', 'faa_data'
+            'drone_altitude', 'pilot_lat', 'pilot_long', 'basic_id'
         ])
         writer.writerow({
             'timestamp': datetime.now().isoformat(),
@@ -1320,14 +1205,13 @@ def update_detection(detection):
             'drone_altitude': detection.get('drone_altitude', ''),
             'pilot_lat': detection.get('pilot_lat', ''),
             'pilot_long': detection.get('pilot_long', ''),
-            'basic_id': detection.get('basic_id', ''),
-            'faa_data': json.dumps(detection.get('faa_data', {}))
+            'basic_id': detection.get('basic_id', '')
         })
     # Append to cumulative CSV
     with open(CUMULATIVE_CSV_FILENAME, mode='a', newline='') as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=[
             'timestamp', 'alias', 'mac', 'rssi', 'drone_lat', 'drone_long',
-            'drone_altitude', 'pilot_lat', 'pilot_long', 'basic_id', 'faa_data'
+            'drone_altitude', 'pilot_lat', 'pilot_long', 'basic_id'
         ])
         writer.writerow({
             'timestamp': datetime.now().isoformat(),
@@ -1339,19 +1223,17 @@ def update_detection(detection):
             'drone_altitude': detection.get('drone_altitude', ''),
             'pilot_lat': detection.get('pilot_lat', ''),
             'pilot_long': detection.get('pilot_long', ''),
-            'basic_id': detection.get('basic_id', ''),
-            'faa_data': json.dumps(detection.get('faa_data', {}))
+            'basic_id': detection.get('basic_id', '')
         })
     # Regenerate full cumulative KML
     generate_cumulative_kml_throttled()
     generate_kml_throttled()
-    
+
     # Emit real-time updates via WebSocket (if available in this context)
     try:
         emit_detections()
         emit_paths()
         emit_cumulative_log()
-        emit_faa_cache()
     except NameError:
         # Emit functions not available in this thread context
         pass
@@ -1475,17 +1357,11 @@ def trigger_backend_webhook_earliest(detection, is_new_detection):
             'drone_long': detection.get('drone_long') if detection.get('drone_long') != 0 else None,
             'pilot_lat': detection.get('pilot_lat') if detection.get('pilot_lat') != 0 else None,
             'pilot_long': detection.get('pilot_long') if detection.get('pilot_long') != 0 else None,
-            'faa_data': None,  # Will be populated below
             'drone_gmap': None,
             'pilot_gmap': None,
             'isNew': is_new_detection
         }
-        
-        # Add FAA data if available
-        faa_data = detection.get('faa_data')
-        if faa_data and isinstance(faa_data, dict) and faa_data.get('data') and isinstance(faa_data['data'].get('items'), list) and len(faa_data['data']['items']) > 0:
-            payload['faa_data'] = faa_data['data']['items'][0]
-        
+
         # Add Google Maps links
         if payload['drone_lat'] and payload['drone_long']:
             payload['drone_gmap'] = f"https://www.google.com/maps?q={payload['drone_lat']},{payload['drone_long']}"
@@ -1508,63 +1384,7 @@ def trigger_backend_webhook_earliest(detection, is_new_detection):
 
 
 # ----------------------
-# FAA Query Helper Functions
-# ----------------------
-def create_retry_session(retries=3, backoff_factor=2, status_forcelist=(502, 503, 504)):
-    logging.debug("Creating retry-enabled session with custom headers for FAA query.")
-    session = requests.Session()
-    session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:137.0) Gecko/20100101 Firefox/137.0",
-        "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "en-US,en;q=0.5",
-        "Referer": "https://uasdoc.faa.gov/listdocs",
-        "client": "external"
-    })
-    retry = Retry(
-        total=retries,
-        read=retries,
-        connect=retries,
-        backoff_factor=backoff_factor,
-        status_forcelist=status_forcelist,
-        raise_on_status=False
-    )
-    adapter = HTTPAdapter(max_retries=retry)
-    session.mount("https://", adapter)
-    return session
-
-def refresh_cookie(session):
-    homepage_url = "https://uasdoc.faa.gov/listdocs"
-    logging.debug("Refreshing FAA cookie by requesting homepage: %s", homepage_url)
-    try:
-        response = session.get(homepage_url, timeout=30)
-        logging.debug("FAA homepage response code: %s", response.status_code)
-    except requests.exceptions.RequestException as e:
-        logging.exception("Error refreshing FAA cookie: %s", e)
-
-def query_remote_id(session, remote_id):
-    endpoint = "https://uasdoc.faa.gov/api/v1/serialNumbers"
-    params = {
-        "itemsPerPage": 8,
-        "pageIndex": 0,
-        "orderBy[0]": "updatedAt",
-        "orderBy[1]": "DESC",
-        "findBy": "serialNumber",
-        "serialNumber": remote_id
-    }
-    logging.debug("Querying FAA API endpoint: %s with params: %s", endpoint, params)
-    try:
-        response = session.get(endpoint, params=params, timeout=30)
-        logging.debug("FAA Request URL: %s", response.url)
-        if response.status_code != 200:
-            logging.error("FAA HTTP error: %s - %s", response.status_code, response.reason)
-            return None
-        return response.json()
-    except Exception as e:
-        logging.exception("Error querying FAA API: %s", e)
-        return None
-
-# ----------------------
-# Webhook popup API Endpoint 
+# Webhook popup API Endpoint
 # ----------------------
 @app.route('/api/webhook_popup', methods=['POST'])
 def webhook_popup():
@@ -1588,78 +1408,6 @@ def webhook_popup():
     except Exception as e:
         logging.error(f"Webhook send error: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
-
-# ----------------------
-# New FAA Query API Endpoint
-# ----------------------
-@app.route('/api/query_faa', methods=['POST'])
-def api_query_faa(): 
-    data = request.get_json()
-    mac = data.get("mac")
-    remote_id = data.get("remote_id")
-    if not mac or not remote_id:
-        return jsonify({"status": "error", "message": "Missing mac or remote_id"}), 400
-    session = create_retry_session()
-    refresh_cookie(session)
-    faa_result = query_remote_id(session, remote_id)
-    # Fallback: if FAA API query failed or returned no records, try cached FAA data by MAC
-    if not faa_result or not faa_result.get("data", {}).get("items"):
-        for (c_mac, _), cached_data in FAA_CACHE.items():
-            if c_mac == mac:
-                faa_result = cached_data
-                break
-    if faa_result is None:
-        return jsonify({"status": "error", "message": "FAA query failed"}), 500
-    if mac in tracked_pairs:
-        tracked_pairs[mac]["faa_data"] = faa_result
-    else:
-        tracked_pairs[mac] = {"basic_id": remote_id, "faa_data": faa_result}
-    write_to_faa_cache(mac, remote_id, faa_result)
-    timestamp = datetime.now().isoformat()
-    try:
-        with open(FAA_LOG_FILENAME, "a", newline='') as csvfile:
-            fieldnames = ["timestamp", "mac", "remote_id", "faa_response"]
-            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-            writer.writerow({
-                "timestamp": timestamp,
-                "mac": mac,
-                "remote_id": remote_id,
-                "faa_response": json.dumps(faa_result)
-            })
-    except Exception as e:
-        print("Error writing to FAA log CSV:", e)
-    generate_kml()
-    return jsonify({"status": "ok", "faa_data": faa_result})
-
-# ----------------------
-# FAA Data GET API Endpoint (by MAC or basic_id)
-# ----------------------
-
-@app.route('/api/faa/<identifier>', methods=['GET'])
-def api_get_faa(identifier):
-    """
-    Retrieve cached FAA data by MAC address or by basic_id (remote ID).
-    """
-    # First try lookup by MAC
-    if identifier in tracked_pairs and 'faa_data' in tracked_pairs[identifier]:
-        return jsonify({'status': 'ok', 'faa_data': tracked_pairs[identifier]['faa_data']})
-    # Then try lookup by basic_id
-    for mac, det in tracked_pairs.items():
-        if det.get('basic_id') == identifier and 'faa_data' in det:
-            return jsonify({'status': 'ok', 'faa_data': det['faa_data']})
-    # Fallback: search cached FAA data by remote_id first, then by MAC
-    for (c_mac, c_rid), faa_data in     FAA_CACHE.items():
-        if c_rid == identifier:
-            return jsonify({'status': 'ok', 'faa_data': faa_data})
-    for (c_mac, c_rid), faa_data in FAA_CACHE.items():
-        if c_mac == identifier:
-            return jsonify({'status': 'ok', 'faa_data': faa_data})
-    return jsonify({'status': 'error', 'message': 'No FAA data found for this identifier'}), 404
-
-
-
-# ----------------------
-
 
 # ----------------------
 # HTML & JS (UI) Section
@@ -2771,12 +2519,6 @@ socket.on('cumulative_log', function(log) {
   // ...
 });
 
-// Listen for real-time FAA cache updates
-socket.on('faa_cache', function(faaCache) {
-  // Optionally update UI with new FAA data
-  // ...
-});
-
 // Listen for inbound ATAK/WinTAK/iTAK operator position reports
 socket.on('tak_contact', function(contact) {
   window.tak_contacts[contact.uid] = contact;
@@ -2792,7 +2534,7 @@ fetch(window.location.origin + '/api/tak_contacts')
   })
   .catch(function() {});
 
-// Remove all polling for detections, serial status, aliases, paths, cumulative log, FAA cache, etc.
+// Remove all polling for detections, serial status, aliases, paths, cumulative log, etc.
 // All UI updates are now handled by Socket.IO events above.
 // ... existing code ...
 
@@ -3148,37 +2890,12 @@ function generatePopupContent(detection, markerType) {
   let aliasText = aliases[detection.mac] ? aliases[detection.mac] : "No Alias";
   content += '<strong>ID:</strong> <span id="aliasDisplay_' + detection.mac + '" style="color:#FF00FF;">' + aliasText + '</span> (MAC: ' + detection.mac + ')<br>';
   
-  if (detection.basic_id || detection.faa_data) {
-    if (detection.basic_id) {
-      content += '<div style="border:2px solid #FF00FF; padding:5px; margin:5px 0;">FAA RemoteID: ' + detection.basic_id + '</div>';
-    }
-    if (detection.basic_id) {
-      content += '<button onclick="queryFaaAPI(\\\'' + detection.mac + '\\\', \\\'' + detection.basic_id + '\\\')" id="queryFaaButton_' + detection.mac + '">Query FAA API</button>';
-    }
-    content += '<div id="faaResult_' + detection.mac + '" style="margin-top:5px;">';
-    if (detection.faa_data) {
-      let faaData = detection.faa_data;
-      let item = null;
-      if (faaData.data && faaData.data.items && faaData.data.items.length > 0) {
-        item = faaData.data.items[0];
-      }
-      if (item) {
-        const fields = ["makeName", "modelName", "series", "trackingNumber", "complianceCategories", "updatedAt"];
-        content += '<div style="border:2px solid #FF69B4; padding:5px; margin:5px 0;">';
-        fields.forEach(function(field) {
-          let value = item[field] !== undefined ? item[field] : "";
-          content += `<div><span style="color:#FF00FF;">${field}:</span> <span style="color:#00FF00;">${value}</span></div>`;
-        });
-        content += '</div>';
-      } else {
-        content += '<div style="border:2px solid #FF69B4; padding:5px; margin:5px 0;">No FAA data available</div>';
-      }
-    }
-    content += '</div><br>';
+  if (detection.basic_id) {
+    content += '<div style="border:2px solid #FF00FF; padding:5px; margin:5px 0;">RemoteID: ' + detection.basic_id + '</div>';
   }
   
   for (const key in detection) {
-    if (['mac', 'basic_id', 'last_update', 'userLocked', 'lockTime', 'faa_data'].indexOf(key) === -1) {
+    if (['mac', 'basic_id', 'last_update', 'userLocked', 'lockTime'].indexOf(key) === -1) {
       content += key + ': ' + detection[key] + '<br>';
     }
   }
@@ -3251,77 +2968,6 @@ function generatePopupContent(detection, markerType) {
   return content;
 }
 
-// New function to query the FAA API.
-async function queryFaaAPI(mac, remote_id) {
-    const button = document.getElementById("queryFaaButton_" + mac);
-    if (button) {
-        button.disabled = true;
-        const originalText = button.textContent;
-        button.textContent = "Querying...";
-        button.style.backgroundColor = "gray";
-    }
-    try {
-        const response = await fetch(window.location.origin + '/api/query_faa', {
-            method: "POST",
-            headers: {"Content-Type": "application/json"},
-            body: JSON.stringify({mac: mac, remote_id: remote_id})
-        });
-        const result = await response.json();
-        if (result.status === "ok") {
-            // Immediately update the in-memory tracked_pairs with the returned FAA data
-            if (window.tracked_pairs && window.tracked_pairs[mac]) {
-              window.tracked_pairs[mac].faa_data = result.faa_data;
-            }
-            const faaDiv = document.getElementById("faaResult_" + mac);
-            if (faaDiv) {
-                let faaData = result.faa_data;
-                let item = null;
-                if (faaData.data && faaData.data.items && faaData.data.items.length > 0) {
-                  item = faaData.data.items[0];
-                }
-                if (item) {
-                  const fields = ["makeName", "modelName", "series", "trackingNumber", "complianceCategories", "updatedAt"];
-                  let html = '<div style="border:2px solid #FF69B4; padding:5px; margin:5px 0;">';
-                  fields.forEach(function(field) {
-                    let value = item[field] !== undefined ? item[field] : "";
-                    html += `<div><span style="color:#FF00FF;">${field}:</span> <span style="color:#00FF00;">${value}</span></div>`;
-                  });
-                  html += '</div>';
-                  faaDiv.innerHTML = html;
-                } else {
-                  faaDiv.innerHTML = '<div style="border:2px solid #FF69B4; padding:5px; margin:5px 0;">No FAA data available</div>';
-                }
-            }
-            // Immediately refresh popups with new FAA data
-            const key = result.mac || mac;
-            if (typeof tracked_pairs !== "undefined" && tracked_pairs[key]) {
-              if (droneMarkers[key]) {
-                droneMarkers[key].setPopupContent(generatePopupContent(tracked_pairs[key], 'drone'));
-                if (droneMarkers[key].isPopupOpen()) {
-                  droneMarkers[key].openPopup();
-                }
-              }
-              if (pilotMarkers[key]) {
-                pilotMarkers[key].setPopupContent(generatePopupContent(tracked_pairs[key], 'pilot'));
-                if (pilotMarkers[key].isPopupOpen()) {
-                  pilotMarkers[key].openPopup();
-                }
-              }
-            }
-        } else {
-            alert("FAA API error: " + result.message);
-        }
-    } catch(error) {
-        console.error("Error querying FAA API:", error);
-    } finally {
-        const button = document.getElementById("queryFaaButton_" + mac);
-        if (button) {
-            button.disabled = false;
-            button.style.backgroundColor = "#333";
-            button.textContent = "Query FAA API";
-        }
-    }
-}
 
 function lockMarker(markerType, id) {
   // Remember previous lock so we can clear its buttons
@@ -5051,7 +4697,6 @@ def handle_connect():
     emit_serial_status()
     emit_paths()
     emit_cumulative_log()
-    emit_faa_cache()
 
 # Helper functions to emit all real-time data
 
@@ -5095,18 +4740,6 @@ def emit_cumulative_log():
         socketio.emit('cumulative_log', get_cumulative_log_for_emit(), )
     except Exception as e:
         logger.debug(f"Error emitting cumulative log: {e}")
-
-def emit_faa_cache():
-    try:
-        # Convert FAA_CACHE to JSON-serializable format
-        serializable_cache = {}
-        for key, value in FAA_CACHE.items():
-            # Convert tuple keys to strings
-            str_key = str(key) if isinstance(key, tuple) else key
-            serializable_cache[str_key] = value
-        socketio.emit('faa_cache', serializable_cache, )
-    except Exception as e:
-        logger.debug(f"Error emitting FAA cache: {e}")
 
 # Helper to get paths for emit
 
