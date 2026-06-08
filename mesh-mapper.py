@@ -6,7 +6,9 @@ import logging
 import colorsys
 import threading
 import socket
+import struct
 import queue as _qmod
+import xml.etree.ElementTree as ET
 import requests
 import urllib3
 import serial
@@ -79,6 +81,13 @@ def cleanup_old_detections():
         elif current_time - last_update > staleThreshold * 3:  # 3x stale threshold (3 minutes)
             detection['status'] = 'inactive'  # Mark as inactive but keep in session
     
+    # Prune stale inbound TAK contacts
+    with TAK_CONTACTS_LOCK:
+        stale_uids = [uid for uid, c in tak_contacts.items()
+                      if current_time - c.get("last_update", 0) > TAK_CONTACT_STALE_S]
+        for uid in stale_uids:
+            del tak_contacts[uid]
+
     # Only clean up FAA cache, but keep drone detections for session persistence
     if len(FAA_CACHE) > MAX_FAA_CACHE_SIZE:
         keys_to_remove = list(FAA_CACHE.keys())[:100]
@@ -489,6 +498,105 @@ def _tak_sender():
                         pass
             except OSError as exc2:
                 logger.warning(f"TAK socket recreate failed: {exc2}")
+
+# Inbound TAK contacts — positions received from ATAK/WinTAK/iTAK operators
+TAK_CONTACT_STALE_S = 300   # prune contacts not updated within 5 minutes
+
+tak_contacts = {}            # {uid: {uid, lat, lon, hae, callsign, cot_type, last_update}}
+TAK_CONTACTS_LOCK = threading.Lock()
+
+# UIDs we emit ourselves — skip them when receiving to avoid self-echo
+_TAK_OWN_PREFIXES = ("DRONE-", "PILOT-", "ANALOGFM-")
+
+def _process_cot(xml_str):
+    """Parse an inbound CoT XML string; update tak_contacts and emit to browser."""
+    try:
+        root = ET.fromstring(xml_str)
+    except ET.ParseError:
+        return
+
+    uid      = root.get("uid", "")
+    cot_type = root.get("type", "")
+
+    # Skip our own outbound events to prevent self-echo
+    if any(uid.startswith(p) for p in _TAK_OWN_PREFIXES):
+        return
+    # Only process position/situation-awareness reports
+    if not cot_type.startswith("a-"):
+        return
+
+    point = root.find("point")
+    if point is None:
+        return
+    try:
+        lat = float(point.get("lat", 0))
+        lon = float(point.get("lon", 0))
+        hae = float(point.get("hae", 0))
+    except (ValueError, TypeError):
+        return
+    if lat == 0 and lon == 0:
+        return
+
+    callsign = uid
+    detail = root.find("detail")
+    if detail is not None:
+        contact = detail.find("contact")
+        if contact is not None:
+            callsign = contact.get("callsign", uid)
+
+    entry = {
+        "uid":        uid,
+        "lat":        lat,
+        "lon":        lon,
+        "hae":        hae,
+        "callsign":   callsign,
+        "cot_type":   cot_type,
+        "last_update": time.time(),
+    }
+    with TAK_CONTACTS_LOCK:
+        tak_contacts[uid] = entry
+
+    try:
+        socketio.emit("tak_contact", entry)
+    except Exception:
+        pass
+
+def _tak_receiver():
+    """Daemon thread: listen on TAK multicast and process inbound CoT events."""
+    def _make_recv_sock():
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        except AttributeError:
+            pass  # not available on all platforms
+        s.bind(("", TAK_MULTICAST_PORT))
+        mreq = struct.pack("4sL",
+                           socket.inet_aton(TAK_MULTICAST_ADDR),
+                           socket.INADDR_ANY)
+        s.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+        s.settimeout(1.0)
+        return s
+
+    sock = _make_recv_sock()
+    logger.info(f"TAK receiver listening on {TAK_MULTICAST_ADDR}:{TAK_MULTICAST_PORT}")
+    while True:
+        try:
+            data, _ = sock.recvfrom(65535)
+            _process_cot(data.decode("utf-8", errors="ignore"))
+        except socket.timeout:
+            pass
+        except OSError as exc:
+            logger.warning(f"TAK receive error, recreating socket: {exc}")
+            try:
+                sock.close()
+            except OSError:
+                pass
+            time.sleep(5)
+            try:
+                sock = _make_recv_sock()
+            except OSError as exc2:
+                logger.warning(f"TAK recv socket recreate failed: {exc2}")
 
 startup_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 # Updated detections CSV header to include faa_data.
@@ -2669,6 +2777,21 @@ socket.on('faa_cache', function(faaCache) {
   // ...
 });
 
+// Listen for inbound ATAK/WinTAK/iTAK operator position reports
+socket.on('tak_contact', function(contact) {
+  window.tak_contacts[contact.uid] = contact;
+  updateTakContactMarker(contact);
+});
+
+// Seed TAK contacts from server on page load
+fetch(window.location.origin + '/api/tak_contacts')
+  .then(function(r) { return r.json(); })
+  .then(function(contacts) {
+    window.tak_contacts = contacts;
+    Object.values(contacts).forEach(updateTakContactMarker);
+  })
+  .catch(function() {});
+
 // Remove all polling for detections, serial status, aliases, paths, cumulative log, FAA cache, etc.
 // All UI updates are now handled by Socket.IO events above.
 // ... existing code ...
@@ -3445,6 +3568,8 @@ const droneCircles = {};
 const pilotCircles = {};
 const analogFmRings = {};    // L.circle range rings for RX5808 analog FM detections
 const analogFmMarkers = {};  // node-position markers for RX5808 detections
+const takContactMarkers = {}; // ATAK/WinTAK/iTAK operator position markers
+window.tak_contacts = {};
 const dronePolylines = {};
 const pilotPolylines = {};
 const dronePathCoords = {};
@@ -3607,6 +3732,48 @@ function generateAnalogFmPopup(det) {
     '</div>';
 }
 // ---- end RX5808 helpers ----
+
+// ---- TAK contact helpers (inbound ATAK/WinTAK/iTAK operators) ----
+function takContactColor(cot_type) {
+  if (!cot_type) return '#aaaaaa';
+  if (cot_type.startsWith('a-f-')) return '#00ccff';   // friendly  – cyan
+  if (cot_type.startsWith('a-h-')) return '#ff4422';   // hostile   – red
+  if (cot_type.startsWith('a-n-')) return '#44ff88';   // neutral   – green
+  return '#ffaa00';                                     // unknown   – amber
+}
+
+function generateTakContactPopup(contact) {
+  const ageSec = contact.last_update
+    ? Math.round(Date.now() / 1000 - contact.last_update)
+    : '?';
+  const aff = (contact.cot_type || '').startsWith('a-f-') ? 'Friendly'
+            : (contact.cot_type || '').startsWith('a-h-') ? 'Hostile'
+            : (contact.cot_type || '').startsWith('a-n-') ? 'Neutral' : 'Unknown';
+  return '<div style="font-family:monospace;font-size:12px;min-width:180px;">' +
+    '<b>&#128100; TAK Contact</b><br>' +
+    '<b>Callsign:</b> ' + (contact.callsign || '?') + '<br>' +
+    '<b>Affiliation:</b> ' + aff + '<br>' +
+    '<b>Type:</b> ' + (contact.cot_type || '?') + '<br>' +
+    '<b>Age:</b> ' + ageSec + 's ago' +
+    '</div>';
+}
+
+function updateTakContactMarker(contact) {
+  if (!contact || !contact.uid || !contact.lat || !contact.lon) return;
+  const color  = takContactColor(contact.cot_type);
+  const popup  = generateTakContactPopup(contact);
+  if (takContactMarkers[contact.uid]) {
+    takContactMarkers[contact.uid].setLatLng([contact.lat, contact.lon]);
+    if (!takContactMarkers[contact.uid].isPopupOpen())
+      takContactMarkers[contact.uid].setPopupContent(popup);
+  } else {
+    takContactMarkers[contact.uid] = L.marker([contact.lat, contact.lon], {
+      icon: createIcon('👤', color),
+      pane: 'droneIconPane'
+    }).bindPopup(popup).addTo(map);
+  }
+}
+// ---- end TAK contact helpers ----
 
 function updateComboList(data) {
   const activePlaceholder = document.getElementById("activePlaceholder");
@@ -3940,6 +4107,16 @@ async function updateData() {
         if (!hasRecentTransmission) {
           alertedNoGpsDrones.delete(det.mac);
         }
+      }
+    }
+    // Prune stale TAK contacts (server prunes at 5 min; JS prunes at 2× STALE_THRESHOLD)
+    const takStale = STALE_THRESHOLD * 2;
+    for (const uid in takContactMarkers) {
+      const c = window.tak_contacts[uid];
+      if (!c || (currentTime - c.last_update > takStale)) {
+        map.removeLayer(takContactMarkers[uid]);
+        delete takContactMarkers[uid];
+        if (window.tak_contacts[uid]) delete window.tak_contacts[uid];
       }
     }
   } catch (error) { console.error("Error fetching detection data:", error); }
@@ -4683,19 +4860,49 @@ Examples:
         action='store_true',
         help='Enable debug logging'
     )
-    
+
+    parser.add_argument(
+        '--no-tak',
+        action='store_true',
+        help='Disable TAK/ATAK CoT multicast output and receiver'
+    )
+
+    parser.add_argument(
+        '--tak-addr',
+        default=None,
+        metavar='ADDR',
+        help=f'TAK multicast address (default: {TAK_MULTICAST_ADDR})'
+    )
+
+    parser.add_argument(
+        '--tak-port',
+        type=int,
+        default=None,
+        metavar='PORT',
+        help=f'TAK multicast port (default: {TAK_MULTICAST_PORT})'
+    )
+
     return parser.parse_args()
 
 def main():
     """Main function with enhanced startup and configuration"""
     global HEADLESS_MODE, AUTO_START_ENABLED, PORT_MONITOR_INTERVAL
-    
+    global TAK_ENABLE, TAK_MULTICAST_ADDR, TAK_MULTICAST_PORT
+
     # Parse command line arguments
     args = parse_arguments()
-    
+
     # Configure global settings
     HEADLESS_MODE = args.headless
     AUTO_START_ENABLED = not args.no_auto_start
+
+    # Apply TAK overrides from CLI before threads start
+    if args.no_tak:
+        TAK_ENABLE = False
+    if args.tak_addr:
+        TAK_MULTICAST_ADDR = args.tak_addr
+    if args.tak_port:
+        TAK_MULTICAST_PORT = args.tak_port
     PORT_MONITOR_INTERVAL = args.port_interval
     
     # Configure logging level
@@ -4729,12 +4936,16 @@ def main():
     # Start Meshtastic position poller for RX5808 analog FM range rings
     threading.Thread(target=_meshtastic_poller, daemon=True,
                      name="MeshtasticPoller").start()
-    threading.Thread(target=_tak_sender, daemon=True,
-                     name="TAKSender").start()
-    logger.info(
-        f"TAK multicast output {'enabled' if TAK_ENABLE else 'disabled'} "
-        f"→ {TAK_MULTICAST_ADDR}:{TAK_MULTICAST_PORT}"
-    )
+    if TAK_ENABLE:
+        threading.Thread(target=_tak_sender, daemon=True,
+                         name="TAKSender").start()
+        threading.Thread(target=_tak_receiver, daemon=True,
+                         name="TAKReceiver").start()
+        logger.info(
+            f"TAK multicast enabled → {TAK_MULTICAST_ADDR}:{TAK_MULTICAST_PORT}"
+        )
+    else:
+        logger.info("TAK multicast disabled (--no-tak)")
     
     if HEADLESS_MODE:
         logger.info("Running in headless mode - press Ctrl+C to stop")
@@ -5051,6 +5262,12 @@ def api_meshtastic_url():
                                        'last_updated': time.time()}
     logger.info(f"Meshtastic URL configured: {node_id} → {url}  pos={pos}")
     return jsonify({'ok': True, 'position': pos})
+
+@app.route('/api/tak_contacts', methods=['GET'])
+def api_tak_contacts():
+    """Return current inbound TAK contacts (ATAK/WinTAK operator positions)."""
+    with TAK_CONTACTS_LOCK:
+        return jsonify(dict(tak_contacts))
 
 # --- Webhook URL Persistence ---
 WEBHOOK_URL_FILE = os.path.join(BASE_DIR, "webhook_url.json")
