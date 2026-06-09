@@ -17,6 +17,7 @@
 #include <string>
 #include "opendroneid.h"
 #include "odid_wifi.h"
+#include "dji_droneid.h"
 
 // Custom UART pin definitions for Serial1
 const int SERIAL1_RX_PIN = 7;  // GPIO7
@@ -216,13 +217,26 @@ void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
   else if (payload[0] == 0x80) {
     int offset = 36;
     bool printed = false;
-    while (offset < length) {
+    while (offset + 1 < length) {
       int typ = payload[offset];
       int len = payload[offset + 1];
-      if (!printed) {
-        if ((typ == 0xdd) &&
-            (((payload[offset + 2] == 0x90 && payload[offset + 3] == 0x3a && payload[offset + 4] == 0xe6)) ||
-             ((payload[offset + 2] == 0xfa && payload[offset + 3] == 0x0b && payload[offset + 4] == 0xbc)))) {
+      if (offset + 2 + len > length) break;
+      if (!printed && typ == 0xdd && len >= 4) {
+        /* DJI DroneID OUI 26:37:12 */
+        if (payload[offset+2] == 0x26 && payload[offset+3] == 0x37 && payload[offset+4] == 0x12) {
+          dji_droneid_t dji;
+          if (dji_parse_droneid(&payload[offset + 5], len - 3, &dji)) {
+            char djijson[384];
+            dji_emit_json(currentUAV->mac, currentUAV->rssi, &dji, djijson, sizeof(djijson));
+            Serial.println(djijson);
+            Serial1.println(djijson);
+            packetCount++;
+            printed = true;
+          }
+        }
+        /* OpenDroneID OUIs FA:0B:BC and 90:3A:E6 */
+        else if (((payload[offset+2] == 0x90 && payload[offset+3] == 0x3a && payload[offset+4] == 0xe6)) ||
+                 ((payload[offset+2] == 0xfa && payload[offset+3] == 0x0b && payload[offset+4] == 0xbc))) {
           int j = offset + 7;
           if (j < length) {
             memset(&UAS_data, 0, sizeof(UAS_data));
