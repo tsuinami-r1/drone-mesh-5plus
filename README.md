@@ -266,29 +266,38 @@ report a signal hit whenever RSSI exceeds your calibrated threshold.
 
 | Component | Notes |
 |-----------|-------|
-| **Seeed XIAO ESP32-S3** | Same board used by other variants |
+| **Seeed XIAO ESP32-S3** or **XIAO ESP32-C5** | Choose one; firmware auto-detects |
 | **RX5808 module** | 5.8GHz analog FM receiver; ~$5–10, widely available |
 | Jumper wires | 4 signal + 2 power wires |
 
-### Wiring — XIAO ESP32-S3 ↔ RX5808
+### Wiring
 
-```
-XIAO ESP32-S3 Pin        RX5808 Pin
-──────────────────────── ──────────
-GPIO9  (D10 / MOSI)  →   DATA
-GPIO7  (D8  / SCK)   →   CLK
-GPIO8  (D9)          →   CS       (active LOW)
-GPIO1  (D0  / ADC)   ←   RSSI     (analog output)
-3.3V                 →   VCC
-GND                  →   GND
-```
+Use the **D-pin labels** silkscreened on the board — the GPIO numbers differ between variants but the physical connections are identical.
 
-Optional — connect a **Heltec LoRa V3** for mesh relay (same wiring as all other
-firmware variants):
+| RX5808 Pin | Board pin | XIAO ESP32-S3 GPIO | XIAO ESP32-C5 GPIO |
+|------------|-----------|-------------------|-------------------|
+| DATA | D10 | GPIO9 | GPIO10 |
+| CLK | D8 | GPIO7 | GPIO8 |
+| CS (active LOW) | D9 | GPIO8 | GPIO9 |
+| RSSI (analog in) | D0 | GPIO1 | GPIO2 |
+| VCC | 3.3V | — | — |
+| GND | GND | — | — |
 
-```
-GPIO5 (D4) → Heltec RX
-GPIO6 (D5) ← Heltec TX
+Optional **Heltec LoRa V3** mesh relay (same physical pins, different GPIOs):
+
+| Signal | Board pin | XIAO ESP32-S3 GPIO | XIAO ESP32-C5 GPIO |
+|--------|-----------|-------------------|-------------------|
+| ESP32 TX → Heltec RX | D4 | GPIO5 | GPIO6 |
+| ESP32 RX ← Heltec TX | D5 | GPIO6 | GPIO7 |
+
+The firmware selects GPIO numbers automatically at compile time based on the target board — no source edits needed.
+
+### Prerequisites
+
+[PlatformIO](https://platformio.org/) must be installed. The quickest path:
+
+```bash
+pip install platformio          # or install via VS Code PlatformIO extension
 ```
 
 ### Build & Flash
@@ -296,17 +305,20 @@ GPIO6 (D5) ← Heltec TX
 ```bash
 cd rx5808-detection
 
-# Compile
-pio run -e seeed_xiao_esp32s3
+# --- XIAO ESP32-S3 ---
+pio run -e seeed_xiao_esp32s3                          # compile only
+pio run -e seeed_xiao_esp32s3 --target upload          # compile + flash
+pio device monitor --baud 115200                       # open serial monitor
 
-# Compile and upload (XIAO connected via USB)
-pio run -e seeed_xiao_esp32s3 --target upload
-
-# Open serial monitor to verify
+# --- XIAO ESP32-C5 ---
+pio run -e seeed_xiao_esp32c5                          # compile only
+pio run -e seeed_xiao_esp32c5 --target upload          # compile + flash
 pio device monitor --baud 115200
 ```
 
-On power-up you should see:
+> **ESP32-C5 boot note:** If upload fails, hold the **BOOT** button, press **RESET**, release BOOT, then re-run the upload command. This forces download mode.
+
+On power-up you should see on the serial monitor:
 ```json
 {"info":"RX5808 scanner ready","node_id":"RX01","channels":40,"threshold":1800}
 ```
@@ -318,12 +330,12 @@ All tuneable constants are at the top of the relevant source files:
 | Constant | File | Default | Description |
 |----------|------|---------|-------------|
 | `RSSI_THRESHOLD` | `src/rx5808.h` | `1800` | ADC count (0–4095) above which a signal is reported |
-| `RSSI_SAMPLES` | `src/rx5808.h` | `10` | ADC reads averaged per measurement |
+| `RSSI_SAMPLES` | `src/rx5808.h` | `10` | ADC reads averaged per RSSI measurement |
 | `TUNE_SETTLE_MS` | `src/rx5808.h` | `30` | ms to wait for RX5808 PLL after tuning |
 | `NODE_ID` | `src/main.cpp` | `"RX01"` | Change per device for multi-node dedup |
 | `ENABLE_MESH_RELAY` | `src/main.cpp` | `1` | Set `0` to disable Heltec UART relay |
-| `MIN_DWELL_HITS` | `src/main.cpp` | `2` | Consecutive reads required to confirm detection |
-| `REPORT_INTERVAL_MS` | `src/main.cpp` | `5000` | Rate-limit re-reports of the same channel |
+| `MIN_DWELL_HITS` | `src/main.cpp` | `2` | Both reads must clear threshold to confirm a hit |
+| `REPORT_INTERVAL_MS` | `src/main.cpp` | `5000` | Rate-limit re-reports of the same channel (ms) |
 
 ### Calibrating the RSSI Threshold
 

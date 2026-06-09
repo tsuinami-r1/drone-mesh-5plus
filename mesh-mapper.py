@@ -5,6 +5,10 @@ import csv
 import logging
 import colorsys
 import threading
+import socket
+import struct
+import queue as _qmod
+import xml.etree.ElementTree as ET
 import requests
 import urllib3
 import serial
@@ -12,7 +16,7 @@ import serial.tools.list_ports
 import signal
 import sys
 import argparse
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, List
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -77,6 +81,13 @@ def cleanup_old_detections():
         elif current_time - last_update > staleThreshold * 3:  # 3x stale threshold (3 minutes)
             detection['status'] = 'inactive'  # Mark as inactive but keep in session
     
+    # Prune stale inbound TAK contacts
+    with TAK_CONTACTS_LOCK:
+        stale_uids = [uid for uid, c in tak_contacts.items()
+                      if current_time - c.get("last_update", 0) > TAK_CONTACT_STALE_S]
+        for uid in stale_uids:
+            del tak_contacts[uid]
+
     # Only clean up FAA cache, but keep drone detections for session persistence
     if len(FAA_CACHE) > MAX_FAA_CACHE_SIZE:
         keys_to_remove = list(FAA_CACHE.keys())[:100]
@@ -270,8 +281,12 @@ def _rssi_to_max_range_m(rssi_raw, tx_dbm=DEFAULT_TX_DBM):
     """Estimate maximum detection radius (m) via free-space path loss at 5.8 GHz."""
     return max(1.0, 10.0 ** ((tx_dbm - _rssi_raw_to_dbm(rssi_raw) - _FSPL_5800_DB) / 20.0))
 
-def _fetch_meshtastic_position(url):
-    """Query Meshtastic HTTP API; return first node position dict or None."""
+def _fetch_meshtastic_position(url, node_id=None):
+    """Query Meshtastic HTTP API; return position dict or None.
+
+    Prefers a node whose shortName or longName matches node_id (case-insensitive).
+    Falls back to the first node with a GPS fix if no name match is found.
+    """
     try:
         r = requests.get(f"{url.rstrip('/')}/api/v1/nodes", timeout=5)
         if r.status_code != 200:
@@ -280,13 +295,32 @@ def _fetch_meshtastic_position(url):
         nodes = payload if isinstance(payload, list) else payload.get("nodes", {})
         if isinstance(nodes, dict):
             nodes = list(nodes.values())
-        for node in nodes:
+
+        def _extract_pos(node):
             pos = node.get("position", {})
             lat = pos.get("latitude") or (pos.get("latitudeI", 0) * 1e-7)
             lon = pos.get("longitude") or (pos.get("longitudeI", 0) * 1e-7)
             if lat and lon:
                 return {"lat": float(lat), "lon": float(lon),
                         "alt": float(pos.get("altitude", 0))}
+            return None
+
+        # Prefer the node whose name matches NODE_ID configured in firmware
+        if node_id:
+            nid_lower = node_id.lower()
+            for node in nodes:
+                user = node.get("user", {})
+                names = {user.get("shortName", ""), user.get("longName", "")}
+                if any(n.lower() == nid_lower for n in names if n):
+                    p = _extract_pos(node)
+                    if p:
+                        return p
+
+        # Fallback: first node with a GPS fix
+        for node in nodes:
+            p = _extract_pos(node)
+            if p:
+                return p
     except Exception as exc:
         logger.debug(f"Meshtastic poll error for {url}: {exc}")
     return None
@@ -295,15 +329,274 @@ def _meshtastic_poller():
     """Daemon thread: refresh node GPS positions from Meshtastic HTTP API."""
     while True:
         with NODE_LOCATIONS_LOCK:
-            items = list(MESHTASTIC_URLS.items())
+            items = list(MESHTASTIC_URLS.items())  # snapshot under lock
         for node_id, url in items:
-            pos = _fetch_meshtastic_position(url)
+            pos = _fetch_meshtastic_position(url, node_id)
             if pos:
                 with NODE_LOCATIONS_LOCK:
                     NODE_LOCATIONS[node_id] = {**pos, "source": "meshtastic",
                                                "last_updated": time.time()}
                 logger.debug(f"Node {node_id} position refreshed: {pos}")
         time.sleep(MESHTASTIC_POLL_INTERVAL)
+
+# ============================================================
+# TAK / ATAK CoT Multicast Output (no external dependencies)
+# ============================================================
+TAK_ENABLE           = True
+TAK_MULTICAST_ADDR   = "239.2.3.1"
+TAK_MULTICAST_PORT   = 6969
+TAK_MULTICAST_TTL    = 32       # hops; 32 reaches LAN + local WAN segments
+TAK_STALE_DRONE_S    = 120      # seconds before ATAK evicts a drone/pilot marker
+TAK_STALE_ANALOG_S   = 60       # analog FM rings have faster re-report (~5 s)
+
+_tak_queue = _qmod.Queue(maxsize=500)
+
+def _cot_ts(dt):
+    return dt.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+
+def _cot_event(uid, cot_type, lat, lon, hae, stale_s, callsign, remarks,
+               extra_detail=""):
+    now   = datetime.now(timezone.utc)
+    stale = now + timedelta(seconds=stale_s)
+    cs    = callsign.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    rm    = remarks.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        f'<event version="2.0" uid="{uid}" type="{cot_type}"'
+        f' time="{_cot_ts(now)}" start="{_cot_ts(now)}"'
+        f' stale="{_cot_ts(stale)}" how="m-g">'
+        f'<point lat="{lat:.7f}" lon="{lon:.7f}"'
+        f' hae="{hae:.1f}" ce="35.0" le="9999999.0"/>'
+        f'<detail><contact callsign="{cs}"/>'
+        f'<remarks>{rm}</remarks>{extra_detail}</detail>'
+        '</event>'
+    )
+
+def _tak_enqueue(detection):
+    """Build and queue CoT events for a fully-enriched detection dict."""
+    if not TAK_ENABLE:
+        return
+    det_type = detection.get("type")
+    mac      = detection.get("mac", "")
+    uid_base = mac.replace(":", "")
+
+    if det_type == "analog_fm":
+        lat      = detection.get("node_lat")
+        lon      = detection.get("node_lon")
+        if not (lat and lon):
+            return
+        radius_m = detection.get("radius_m")
+        band     = detection.get("band", "?")
+        ch       = detection.get("ch", "?")
+        freq     = detection.get("freq_mhz", "?")
+        rssi     = detection.get("rssi_raw", detection.get("rssi", "?"))
+        node_id  = detection.get("node_id", "?")
+        callsign = f"5.8G-{band}{ch}-{freq}MHz"
+        remarks  = f"Analog FM {freq}MHz RSSI={rssi} node={node_id}"
+
+        # Point marker at the node (sensor) position
+        try:
+            _tak_queue.put_nowait(_cot_event(
+                uid=f"ANALOGFM-{uid_base}",
+                cot_type="a-u-G-E-S",       # unknown ground electronic sensor
+                lat=float(lat), lon=float(lon), hae=0.0,
+                stale_s=TAK_STALE_ANALOG_S,
+                callsign=callsign, remarks=remarks
+            ))
+        except _qmod.Full:
+            pass
+
+        # Estimated range ring as a circle shape
+        if radius_m:
+            ring_extra = (
+                f'<shape><ellipse major="{radius_m}" minor="{radius_m}"'
+                f' angle="0"/></shape>'
+                '<strokeColor value="-256"/>'         # ARGB 0xFFFFFF00 = yellow
+                '<fillColor value="587202560"/>'      # ARGB 0x23FFFF00 = transparent yellow
+                '<strokeWeight value="2.0"/>'
+            )
+            try:
+                _tak_queue.put_nowait(_cot_event(
+                    uid=f"ANALOGFM-RING-{uid_base}",
+                    cot_type="u-r-b-c-c",             # user-defined range/bearing circle
+                    lat=float(lat), lon=float(lon), hae=0.0,
+                    stale_s=TAK_STALE_ANALOG_S,
+                    callsign=f"{callsign} ~{radius_m}m",
+                    remarks=remarks,
+                    extra_detail=ring_extra
+                ))
+            except _qmod.Full:
+                pass
+
+    else:
+        # RemoteID GPS drone
+        drone_lat = detection.get("drone_lat", 0)
+        drone_lon = detection.get("drone_long", 0)
+        if drone_lat == 0 and drone_lon == 0:
+            return
+        hae      = float(detection.get("drone_altitude", 0) or 0)
+        callsign = detection.get("basic_id") or mac
+        rssi     = detection.get("rssi", "?")
+        remarks  = f"RemoteID MAC:{mac} RSSI:{rssi}"
+        try:
+            _tak_queue.put_nowait(_cot_event(
+                uid=f"DRONE-{uid_base}",
+                cot_type="a-u-A-M-F-U-M",    # unknown unmanned aircraft
+                lat=float(drone_lat), lon=float(drone_lon), hae=hae,
+                stale_s=TAK_STALE_DRONE_S,
+                callsign=callsign, remarks=remarks
+            ))
+        except _qmod.Full:
+            pass
+
+        # Pilot location if present
+        pilot_lat = detection.get("pilot_lat", 0)
+        pilot_lon = detection.get("pilot_long", 0)
+        if pilot_lat and pilot_lon:
+            try:
+                _tak_queue.put_nowait(_cot_event(
+                    uid=f"PILOT-{uid_base}",
+                    cot_type="a-u-G-U-C-F",   # unknown ground combatant (foot)
+                    lat=float(pilot_lat), lon=float(pilot_lon), hae=0.0,
+                    stale_s=TAK_STALE_DRONE_S,
+                    callsign=f"{callsign}-PILOT",
+                    remarks=f"Pilot for {callsign} MAC:{mac}"
+                ))
+            except _qmod.Full:
+                pass
+
+def _tak_sender():
+    """Daemon thread: drain _tak_queue and multicast CoT XML over UDP."""
+    def _make_sock():
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        s.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, TAK_MULTICAST_TTL)
+        return s
+
+    sock = _make_sock()
+    while True:
+        msg = None
+        try:
+            msg = _tak_queue.get(timeout=1)
+            sock.sendto(msg.encode("utf-8"),
+                        (TAK_MULTICAST_ADDR, TAK_MULTICAST_PORT))
+        except _qmod.Empty:
+            pass
+        except OSError as exc:
+            logger.warning(f"TAK send error, recreating socket: {exc}")
+            try:
+                sock.close()
+            except OSError:
+                pass
+            time.sleep(5)
+            try:
+                sock = _make_sock()
+                # Re-enqueue the failed message so it's not lost
+                if msg:
+                    try:
+                        _tak_queue.put_nowait(msg)
+                    except _qmod.Full:
+                        pass
+            except OSError as exc2:
+                logger.warning(f"TAK socket recreate failed: {exc2}")
+
+# Inbound TAK contacts — positions received from ATAK/WinTAK/iTAK operators
+TAK_CONTACT_STALE_S = 300   # prune contacts not updated within 5 minutes
+
+tak_contacts = {}            # {uid: {uid, lat, lon, hae, callsign, cot_type, last_update}}
+TAK_CONTACTS_LOCK = threading.Lock()
+
+# UIDs we emit ourselves — skip them when receiving to avoid self-echo
+_TAK_OWN_PREFIXES = ("DRONE-", "PILOT-", "ANALOGFM-")
+
+def _process_cot(xml_str):
+    """Parse an inbound CoT XML string; update tak_contacts and emit to browser."""
+    try:
+        root = ET.fromstring(xml_str)
+    except ET.ParseError:
+        return
+
+    uid      = root.get("uid", "")
+    cot_type = root.get("type", "")
+
+    # Skip our own outbound events to prevent self-echo
+    if any(uid.startswith(p) for p in _TAK_OWN_PREFIXES):
+        return
+    # Only process position/situation-awareness reports
+    if not cot_type.startswith("a-"):
+        return
+
+    point = root.find("point")
+    if point is None:
+        return
+    try:
+        lat = float(point.get("lat", 0))
+        lon = float(point.get("lon", 0))
+        hae = float(point.get("hae", 0))
+    except (ValueError, TypeError):
+        return
+    if lat == 0 and lon == 0:
+        return
+
+    callsign = uid
+    detail = root.find("detail")
+    if detail is not None:
+        contact = detail.find("contact")
+        if contact is not None:
+            callsign = contact.get("callsign", uid)
+
+    entry = {
+        "uid":        uid,
+        "lat":        lat,
+        "lon":        lon,
+        "hae":        hae,
+        "callsign":   callsign,
+        "cot_type":   cot_type,
+        "last_update": time.time(),
+    }
+    with TAK_CONTACTS_LOCK:
+        tak_contacts[uid] = entry
+
+    try:
+        socketio.emit("tak_contact", entry)
+    except Exception:
+        pass
+
+def _tak_receiver():
+    """Daemon thread: listen on TAK multicast and process inbound CoT events."""
+    def _make_recv_sock():
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        except AttributeError:
+            pass  # not available on all platforms
+        s.bind(("", TAK_MULTICAST_PORT))
+        mreq = struct.pack("4sL",
+                           socket.inet_aton(TAK_MULTICAST_ADDR),
+                           socket.INADDR_ANY)
+        s.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+        s.settimeout(1.0)
+        return s
+
+    sock = _make_recv_sock()
+    logger.info(f"TAK receiver listening on {TAK_MULTICAST_ADDR}:{TAK_MULTICAST_PORT}")
+    while True:
+        try:
+            data, _ = sock.recvfrom(65535)
+            _process_cot(data.decode("utf-8", errors="ignore"))
+        except socket.timeout:
+            pass
+        except OSError as exc:
+            logger.warning(f"TAK receive error, recreating socket: {exc}")
+            try:
+                sock.close()
+            except OSError:
+                pass
+            time.sleep(5)
+            try:
+                sock = _make_recv_sock()
+            except OSError as exc2:
+                logger.warning(f"TAK recv socket recreate failed: {exc2}")
 
 startup_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 # Updated detections CSV header to include faa_data.
@@ -843,7 +1136,10 @@ def update_detection(detection):
     mac = detection.get("mac")
     if not mac:
         return
-    prev = tracked_pairs.get(mac)
+
+    # Extract and remove internal routing flags before the detection
+    # is stored or emitted — they must not appear in frontend JSON.
+    skip_faa = detection.pop('_skip_faa', False)
 
     # Retrieve new drone coordinates from the detection
     new_drone_lat = detection.get("drone_lat", 0)
@@ -851,7 +1147,7 @@ def update_detection(detection):
     valid_drone = (new_drone_lat != 0 and new_drone_long != 0)
 
     if not valid_drone:
-        print(f"No-GPS detection for {mac}; forwarding for processing.")
+        logger.debug(f"No-GPS detection for {mac}; forwarding for processing.")
         # Set last_update for no-GPS detections so they can be tracked for timeout
         detection["last_update"] = time.time()
         # Mark as active since this is a fresh detection
@@ -877,7 +1173,7 @@ def update_detection(detection):
         # Skip FAA lookup for RX5808 analog FM detections — they carry no valid
         # RemoteID that could match the FAA registration database.
         remote_id = detection.get("basic_id")
-        if mac and not detection.get("_skip_faa"):
+        if mac and not skip_faa:
             # Exact match if basic_id provided
             if remote_id:
                 key = (mac, remote_id)
@@ -954,6 +1250,7 @@ def update_detection(detection):
         except Exception:
             pass
         
+        _tak_enqueue(detection)
         # Cache FAA data even for no-GPS
         if detection.get('basic_id'):
             write_to_faa_cache(mac, detection['basic_id'], detection.get('faa_data', {}))
@@ -974,7 +1271,7 @@ def update_detection(detection):
         detection["basic_id"] = tracked_pairs[mac]["basic_id"]
     remote_id = detection.get("basic_id")
     # Try exact cache lookup by (mac, remote_id), then fallback to any cached data for this mac, then to previous tracked_pairs entry
-    if mac and not detection.get("_skip_faa"):
+    if mac and not skip_faa:
         # Exact match if basic_id provided
         if remote_id:
             key = (mac, remote_id)
@@ -1005,8 +1302,9 @@ def update_detection(detection):
         socketio.emit('detection', detection, )
     except Exception:
         pass
+    _tak_enqueue(detection)
     detection_history.append(detection.copy())
-    print("Updated tracked_pairs:", tracked_pairs)
+    logger.debug(f"Updated tracked_pairs for {mac}")
     with open(CSV_FILENAME, mode='a', newline='') as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=[
             'timestamp', 'alias', 'mac', 'rssi', 'drone_lat', 'drone_long',
@@ -2479,6 +2777,21 @@ socket.on('faa_cache', function(faaCache) {
   // ...
 });
 
+// Listen for inbound ATAK/WinTAK/iTAK operator position reports
+socket.on('tak_contact', function(contact) {
+  window.tak_contacts[contact.uid] = contact;
+  updateTakContactMarker(contact);
+});
+
+// Seed TAK contacts from server on page load
+fetch(window.location.origin + '/api/tak_contacts')
+  .then(function(r) { return r.json(); })
+  .then(function(contacts) {
+    window.tak_contacts = contacts;
+    Object.values(contacts).forEach(updateTakContactMarker);
+  })
+  .catch(function() {});
+
 // Remove all polling for detections, serial status, aliases, paths, cumulative log, FAA cache, etc.
 // All UI updates are now handled by Socket.IO events above.
 // ... existing code ...
@@ -3255,6 +3568,8 @@ const droneCircles = {};
 const pilotCircles = {};
 const analogFmRings = {};    // L.circle range rings for RX5808 analog FM detections
 const analogFmMarkers = {};  // node-position markers for RX5808 detections
+const takContactMarkers = {}; // ATAK/WinTAK/iTAK operator position markers
+window.tak_contacts = {};
 const dronePolylines = {};
 const pilotPolylines = {};
 const dronePathCoords = {};
@@ -3418,6 +3733,48 @@ function generateAnalogFmPopup(det) {
 }
 // ---- end RX5808 helpers ----
 
+// ---- TAK contact helpers (inbound ATAK/WinTAK/iTAK operators) ----
+function takContactColor(cot_type) {
+  if (!cot_type) return '#aaaaaa';
+  if (cot_type.startsWith('a-f-')) return '#00ccff';   // friendly  – cyan
+  if (cot_type.startsWith('a-h-')) return '#ff4422';   // hostile   – red
+  if (cot_type.startsWith('a-n-')) return '#44ff88';   // neutral   – green
+  return '#ffaa00';                                     // unknown   – amber
+}
+
+function generateTakContactPopup(contact) {
+  const ageSec = contact.last_update
+    ? Math.round(Date.now() / 1000 - contact.last_update)
+    : '?';
+  const aff = (contact.cot_type || '').startsWith('a-f-') ? 'Friendly'
+            : (contact.cot_type || '').startsWith('a-h-') ? 'Hostile'
+            : (contact.cot_type || '').startsWith('a-n-') ? 'Neutral' : 'Unknown';
+  return '<div style="font-family:monospace;font-size:12px;min-width:180px;">' +
+    '<b>&#128100; TAK Contact</b><br>' +
+    '<b>Callsign:</b> ' + (contact.callsign || '?') + '<br>' +
+    '<b>Affiliation:</b> ' + aff + '<br>' +
+    '<b>Type:</b> ' + (contact.cot_type || '?') + '<br>' +
+    '<b>Age:</b> ' + ageSec + 's ago' +
+    '</div>';
+}
+
+function updateTakContactMarker(contact) {
+  if (!contact || !contact.uid || !contact.lat || !contact.lon) return;
+  const color  = takContactColor(contact.cot_type);
+  const popup  = generateTakContactPopup(contact);
+  if (takContactMarkers[contact.uid]) {
+    takContactMarkers[contact.uid].setLatLng([contact.lat, contact.lon]);
+    if (!takContactMarkers[contact.uid].isPopupOpen())
+      takContactMarkers[contact.uid].setPopupContent(popup);
+  } else {
+    takContactMarkers[contact.uid] = L.marker([contact.lat, contact.lon], {
+      icon: createIcon('👤', color),
+      pane: 'droneIconPane'
+    }).bindPopup(popup).addTo(map);
+  }
+}
+// ---- end TAK contact helpers ----
+
 function updateComboList(data) {
   const activePlaceholder = document.getElementById("activePlaceholder");
   const inactivePlaceholder = document.getElementById("inactivePlaceholder");
@@ -3546,7 +3903,7 @@ async function updateData() {
       // ALSO handle no-GPS drones here in centralized popup logic
       const hasGps = validDrone || (pilotLat !== 0 && pilotLng !== 0);
       const hasRecentTransmission = det.last_update && (currentTime - det.last_update <= 5);
-      const isNoGpsDrone = !hasGps && hasRecentTransmission;
+      const isNoGpsDrone = !hasGps && hasRecentTransmission && det.type !== 'analog_fm';
       
       let shouldShowPopup = false;
       let popupIsNew = false;
@@ -3750,6 +4107,16 @@ async function updateData() {
         if (!hasRecentTransmission) {
           alertedNoGpsDrones.delete(det.mac);
         }
+      }
+    }
+    // Prune stale TAK contacts (server prunes at 5 min; JS prunes at 2× STALE_THRESHOLD)
+    const takStale = STALE_THRESHOLD * 2;
+    for (const uid in takContactMarkers) {
+      const c = window.tak_contacts[uid];
+      if (!c || (currentTime - c.last_update > takStale)) {
+        map.removeLayer(takContactMarkers[uid]);
+        delete takContactMarkers[uid];
+        if (window.tak_contacts[uid]) delete window.tak_contacts[uid];
       }
     }
   } catch (error) { console.error("Error fetching detection data:", error); }
@@ -4493,19 +4860,49 @@ Examples:
         action='store_true',
         help='Enable debug logging'
     )
-    
+
+    parser.add_argument(
+        '--no-tak',
+        action='store_true',
+        help='Disable TAK/ATAK CoT multicast output and receiver'
+    )
+
+    parser.add_argument(
+        '--tak-addr',
+        default=None,
+        metavar='ADDR',
+        help=f'TAK multicast address (default: {TAK_MULTICAST_ADDR})'
+    )
+
+    parser.add_argument(
+        '--tak-port',
+        type=int,
+        default=None,
+        metavar='PORT',
+        help=f'TAK multicast port (default: {TAK_MULTICAST_PORT})'
+    )
+
     return parser.parse_args()
 
 def main():
     """Main function with enhanced startup and configuration"""
     global HEADLESS_MODE, AUTO_START_ENABLED, PORT_MONITOR_INTERVAL
-    
+    global TAK_ENABLE, TAK_MULTICAST_ADDR, TAK_MULTICAST_PORT
+
     # Parse command line arguments
     args = parse_arguments()
-    
+
     # Configure global settings
     HEADLESS_MODE = args.headless
     AUTO_START_ENABLED = not args.no_auto_start
+
+    # Apply TAK overrides from CLI before threads start
+    if args.no_tak:
+        TAK_ENABLE = False
+    if args.tak_addr:
+        TAK_MULTICAST_ADDR = args.tak_addr
+    if args.tak_port:
+        TAK_MULTICAST_PORT = args.tak_port
     PORT_MONITOR_INTERVAL = args.port_interval
     
     # Configure logging level
@@ -4539,6 +4936,16 @@ def main():
     # Start Meshtastic position poller for RX5808 analog FM range rings
     threading.Thread(target=_meshtastic_poller, daemon=True,
                      name="MeshtasticPoller").start()
+    if TAK_ENABLE:
+        threading.Thread(target=_tak_sender, daemon=True,
+                         name="TAKSender").start()
+        threading.Thread(target=_tak_receiver, daemon=True,
+                         name="TAKReceiver").start()
+        logger.info(
+            f"TAK multicast enabled → {TAK_MULTICAST_ADDR}:{TAK_MULTICAST_PORT}"
+        )
+    else:
+        logger.info("TAK multicast disabled (--no-tak)")
     
     if HEADLESS_MODE:
         logger.info("Running in headless mode - press Ctrl+C to stop")
@@ -4846,7 +5253,8 @@ def api_meshtastic_url():
     url     = str(data.get('url', '')).strip().rstrip('/')
     if not node_id or not url:
         return jsonify({'error': 'node_id and url required'}), 400
-    MESHTASTIC_URLS[node_id] = url
+    with NODE_LOCATIONS_LOCK:
+        MESHTASTIC_URLS[node_id] = url
     pos = _fetch_meshtastic_position(url)
     if pos:
         with NODE_LOCATIONS_LOCK:
@@ -4854,6 +5262,12 @@ def api_meshtastic_url():
                                        'last_updated': time.time()}
     logger.info(f"Meshtastic URL configured: {node_id} → {url}  pos={pos}")
     return jsonify({'ok': True, 'position': pos})
+
+@app.route('/api/tak_contacts', methods=['GET'])
+def api_tak_contacts():
+    """Return current inbound TAK contacts (ATAK/WinTAK operator positions)."""
+    with TAK_CONTACTS_LOCK:
+        return jsonify(dict(tak_contacts))
 
 # --- Webhook URL Persistence ---
 WEBHOOK_URL_FILE = os.path.join(BASE_DIR, "webhook_url.json")
