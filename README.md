@@ -182,6 +182,9 @@ python3 mesh-mapper.py [OPTIONS]
 | `--web-port PORT` | Web interface port | 5000 |
 | `--port-interval SECONDS` | Port monitoring interval | 10 |
 | `--no-auto-start` | Disable automatic port connection | false |
+| `--no-tak` | Disable TAK/ATAK CoT multicast output and receiver | false |
+| `--tak-addr ADDR` | TAK multicast address | 239.2.3.1 |
+| `--tak-port PORT` | TAK multicast port | 6969 |
 
 ### **Examples**
 
@@ -247,6 +250,14 @@ python3 mesh-mapper.py --no-auto-start
 | `GET` | `/download/cumulative_detections.csv` | Download full history (CSV) |
 | `GET` | `/download/cumulative.kml` | Download full history (KML) |
 
+### **RX5808 / TAK Integration**
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET/POST` | `/api/node_location` | Get or set manual GPS for an RX5808 node |
+| `GET/POST` | `/api/meshtastic_url` | Get or set Meshtastic HTTP API URL for a node |
+| `GET` | `/api/tak_contacts` | Current inbound ATAK/WinTAK/iTAK operator positions |
+
 ### **System Management**
 
 | Method | Endpoint | Description |
@@ -261,12 +272,14 @@ python3 mesh-mapper.py --no-auto-start
 
 Real-time events pushed to connected clients:
 
-- `detections` - Updated drone detection data
-- `paths` - Updated flight path data  
+- `detections` - Full drone detection state (all tracked MACs)
+- `detection` - Single detection update (real-time, per-event)
+- `paths` - Updated flight path data
 - `serial_status` - ESP32 connection status changes
 - `aliases` - Device alias updates
 - `cumulative_log` - Historical data updates
 - `faa_cache` - FAA lookup results
+- `tak_contact` - Inbound ATAK/WinTAK/iTAK operator position (lat/lon/callsign/type)
 
 ---
 
@@ -338,7 +351,70 @@ The firmware selects GPIO numbers automatically at compile time based on the tar
 pip install platformio          # or install via VS Code PlatformIO extension
 ```
 
-### Build & Flash
+### Full Flashing Steps
+
+**Step 1 — Set a unique Node ID before flashing (required for multi-node)**
+
+Open `rx5808-detection/src/main.cpp` and change `NODE_ID` to something unique per device. This must match the Meshtastic node's `shortName`/`longName` for range rings to work.
+
+```cpp
+// Line ~47 in main.cpp — change for each chip you flash
+#define NODE_ID  "RX01"    // e.g. "RX02", "RX03", …
+```
+
+**Step 2 — (Optional) Adjust RSSI threshold**
+
+Open `rx5808-detection/src/rx5808.h`. The default of `1800` is a safe starting point; tune after calibration.
+
+```cpp
+#define RSSI_THRESHOLD   1800   // raise if you get false positives
+```
+
+**Step 3 — Wire the hardware**
+
+See the wiring table above. Connect the XIAO to your computer via USB-C.
+
+**Step 4 — Flash**
+
+```bash
+cd rx5808-detection
+
+# XIAO ESP32-S3
+pio run -e seeed_xiao_esp32s3 --target upload
+
+# XIAO ESP32-C5
+pio run -e seeed_xiao_esp32c5 --target upload
+```
+
+> **ESP32-C5 boot mode:** If upload fails with a connection error, hold **BOOT**, tap **RESET**, release **BOOT**, then immediately re-run the command. This forces the chip into download mode. The S3 does not require this.
+
+**Step 5 — Verify on serial monitor**
+
+```bash
+pio device monitor --baud 115200
+```
+
+You should see within a few seconds:
+```json
+{"info":"RX5808 scanner ready","node_id":"RX01","channels":40,"threshold":1800}
+```
+
+If nothing appears for >5 s, check USB-CDC enumeration: the XIAO waits up to 3 s for a host connection before emitting. Replug and reopen the monitor.
+
+**Step 6 — Calibrate threshold (first-time only)**
+
+With no FPV transmitter powered:
+1. Watch the monitor for 30 seconds. Any `rssi_raw` values that appear are your **noise floor**.
+2. Set `RSSI_THRESHOLD` to (noise floor + 200) in `rx5808.h`.
+3. Reflash (Step 4). Power a known FPV transmitter nearby and confirm detections.
+
+**Step 7 — Connect to mesh-mapper**
+
+1. Start `mesh-mapper.py` on your server machine.
+2. In the web UI Settings panel, select the XIAO's USB serial port.
+3. For range-ring display: set the node's Meshtastic URL or manual coordinates (see Integration section below).
+
+### Build & Flash (quick reference)
 
 ```bash
 cd rx5808-detection
@@ -353,8 +429,6 @@ pio run -e seeed_xiao_esp32c5                          # compile only
 pio run -e seeed_xiao_esp32c5 --target upload          # compile + flash
 pio device monitor --baud 115200
 ```
-
-> **ESP32-C5 boot note:** If upload fails, hold the **BOOT** button, press **RESET**, release BOOT, then re-run the upload command. This forces download mode.
 
 On power-up you should see on the serial monitor:
 ```json
@@ -414,14 +488,36 @@ AnalogFM: R1 5658MHz rssi=2240 [RX01]
 
 ### Integration with mesh-mapper.py
 
-No extra configuration is needed. Connect the XIAO via USB, select the port in
-the mapper UI, and analog FM detections will appear in the **no-GPS detections
-panel** alongside RemoteID detections.
+Connect the XIAO via USB, select the port in the mapper UI, and analog FM
+detections will begin flowing immediately.
+
+**What appears in the UI:**
+
+| Without node position | With node position |
+|---|---|
+| Detection listed in no-GPS panel | Dashed-circle range ring on the map |
+| Band, channel, frequency, RSSI shown | 📡 marker at the node's GPS location |
+| No map marker | Ring radius = FSPL-derived max detection range |
+
+To get the range ring, give mesh-mapper a position for the node. Two options:
+
+**Option A — Meshtastic HTTP API (automatic, updates every 30 s):**
+Open the mapper Settings panel and enter the Heltec node's URL:
+```
+POST /api/meshtastic_url  { "node_id": "RX01", "url": "http://192.168.1.x" }
+```
+The node's `shortName` or `longName` in Meshtastic must match `NODE_ID` in the firmware (e.g. `"RX01"`). The poller will pick up the correct node even in a multi-node mesh.
+
+**Option B — manual coordinates:**
+```
+POST /api/node_location  { "node_id": "RX01", "lat": 25.7617, "lon": -80.1918 }
+```
 
 Differences from RemoteID detections:
-- `type: "analog_fm"` is logged prominently at INFO level with band/channel/RSSI.
-- FAA registration lookup is **skipped** (the synthetic ID cannot match the FAA DB).
-- No map marker is placed (there are no GPS coordinates from an RX5808 alone).
+- `type: "analog_fm"` is logged at INFO level with band/channel/RSSI.
+- FAA registration lookup is **skipped** (synthetic MAC cannot match the FAA DB).
+- Range rings are colored by signal strength: green ≥ 3000, amber ≥ 2200, red below.
+- Each detection is also forwarded to ATAK/WinTAK as two CoT events: a `a-u-G-E-S` sensor marker and a `u-r-b-c-c` range ring shape.
 
 ### Channel Map
 
