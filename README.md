@@ -7,7 +7,7 @@
 [![ESP32](https://img.shields.io/badge/ESP32-Compatible-green.svg)](https://www.espressif.com/)
 [![Flask](https://img.shields.io/badge/Flask-2.0+-red.svg)](https://flask.palletsprojects.com/)
 
-**Real-time drone detection, mapping, and Remote ID compliance monitoring**
+**Real-time drone detection, mapping, and Remote ID monitoring — ASTM OpenDroneID + DJI DroneID**
 
 [🚀 Quick Start](#-quick-start) • [📋 Features](#-features) • [🛠️ API Reference](#-api-reference) • [🔧 Hardware](#-hardware-setup)
 
@@ -21,7 +21,19 @@
 
 Advanced drone detection system that captures and maps Remote ID broadcasts from drones using ESP32 hardware. Features real-time web interface, persistent tracking across sessions, and comprehensive data export capabilities.
 
-Original code by Luke Switzer and ColonelPanic. Currently prototyping RX5808 integration for analog 5ghz FM scanning.
+Original code by Luke Switzer and ColonelPanic. Currently prototyping RX5808 integration for analog 5.8 GHz FM scanning.
+
+### Protocol coverage
+
+| Protocol | Transport | OUI / identifier | Firmware support |
+|----------|-----------|-----------------|-----------------|
+| ASTM F3411 / OpenDroneID | 802.11 beacon (IE 221) | `FA:0B:BC` | All variants |
+| ASD-STAN 4709-002 | 802.11 beacon (IE 221) | `90:3A:E6` | All variants |
+| ASTM F3411 / OpenDroneID | Wi-Fi NAN action frame | `org.opendroneid.remoteid` hash | All variants |
+| **DJI DroneID** | **802.11 beacon (IE 221)** | **`26:37:12`** | **All variants (this branch)** |
+| DJI OcuSync / O3 / O4 | OFDM (~2.4295 GHz video band) | — | ❌ Requires SDR |
+
+> **DJI Wi-Fi coverage caveat:** Modern DJI aircraft (Mini 3 Pro, Air 3, Mavic 3 series) primarily use OcuSync/O3/O4 for their DroneID downlink, which is OFDM in the video band and **cannot be demodulated by an ESP32**. The Wi-Fi IE221 DroneID broadcast (`26:37:12`) is present on older and budget models; treat it as partial fleet coverage, not "all DJI".
 
 ---
 
@@ -68,7 +80,7 @@ This installer handles:
 - ✅ **System Detection**: Automatically detects Linux, macOS, Windows
 - ✅ **Package Manager Support**: apt, yum, dnf, pacman, brew, pkg
 - ✅ **Python & pip**: Ensures compatible Python 3.7+ and pip installation
-- ✅ **Core Dependencies**: Flask, Flask-SocketIO, pyserial, requests, urllib3
+- ✅ **Core Dependencies**: Flask, Flask-SocketIO, pyserial, requests
 - ✅ **Optional Packages**: Performance and development tools
 
 ### 📖 **Manual Setup**
@@ -80,7 +92,7 @@ This installer handles:
 
 2. **Install dependencies**
    ```bash
-   pip3 install Flask Flask-SocketIO pyserial requests urllib3 python-socketio eventlet
+   pip3 install Flask Flask-SocketIO pyserial requests python-socketio eventlet
    ```
 
 3. **Flash ESP32 firmware**
@@ -124,7 +136,6 @@ This installer handles:
 ### ⚙️ **Configuration & Monitoring**
 - **Headless Operation**: Run without web interface for dedicated deployments
 - **Debug Logging**: Detailed logging for troubleshooting and development
-- **FAA Integration**: Automatic Remote ID registration lookups
 - **Webhook Support**: External system integration via HTTP callbacks
 
 ---
@@ -192,12 +203,10 @@ python3 mesh-mapper.py --no-auto-start
 | `GET` | `/api/serial_status` | ESP32 connection status |
 | `GET` | `/api/selected_ports` | Currently configured ports |
 
-### **FAA & External Integration**
+### **External Integration**
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `GET` | `/api/faa/<identifier>` | FAA registration lookup |
-| `POST` | `/api/query_faa` | Manual FAA query |
 | `POST` | `/api/set_webhook_url` | Configure webhook endpoint |
 | `GET` | `/api/get_webhook_url` | Get current webhook URL |
 | `POST` | `/api/webhook_popup` | Webhook notification handler |
@@ -240,7 +249,6 @@ Real-time events pushed to connected clients:
 - `serial_status` - ESP32 connection status changes
 - `aliases` - Device alias updates
 - `cumulative_log` - Historical data updates
-- `faa_cache` - FAA lookup results
 - `tak_contact` - Inbound ATAK/WinTAK/iTAK operator position (lat/lon/callsign/type)
 
 ---
@@ -262,6 +270,76 @@ RX1 (d5)  | TX 20
 3.3V      | VCC
 GND       | GND
 ```
+
+---
+
+## 🚁 **DJI DroneID Parsing** (`src/dji_droneid.h`)
+
+All four firmware variants (`remoteid-mesh`, `node-mode-dualcore`, `remoteid-mesh-dualcore`, `remoteid-c5-5g`) now decode DJI's proprietary Wi-Fi DroneID alongside the existing ASTM/OpenDroneID path.
+
+### How it works
+
+DJI drones broadcast unencrypted telemetry in a vendor-specific 802.11 beacon information element (tag 221 / `0xDD`) under OUI `26:37:12`. This is entirely separate from the ASTM standard — same tag number, different OUI, completely different payload layout.
+
+The parser in `src/dji_droneid.h` is a header-only C implementation. The byte layout is reverse-engineered from Kismet's `dot11_ie_221_dji_droneid.ksy` (credit: Freek van Tienen & Jan Dumon). Key conversions:
+- **Lat/lon**: raw `int32` in radians × 10⁷; divided by `174533.0` to yield decimal degrees (= 10⁷ ÷ 57.2958)
+- **Yaw**: raw `int16` ÷ 100 ÷ 57.296 → radians
+
+### IE walk integration
+
+Inside the 802.11 beacon frame handler in `main.cpp`, the tag-221 walk now checks OUI `26:37:12` *before* the existing OpenDroneID OUIs. A successful parse calls `dji_parse_droneid()` then `dji_emit_json()`, emitting one JSON line per detected frame. The OpenDroneID branch (`FA:0B:BC` / `90:3A:E6`) is unchanged. Both branches share a hardened while loop with explicit bounds guards:
+
+```c
+while (offset + 1 < length) {
+    int typ = payload[offset];
+    int len = payload[offset + 1];
+    if (offset + 2 + len > length) break;  /* prevent over-read on malformed IE */
+    if (typ == 0xdd && len >= 4) {
+        if (/* OUI == 26:37:12 */) { /* DJI path */ }
+        else if (/* OUI == FA:0B:BC or 90:3A:E6 */) { /* OpenDroneID path */ }
+    }
+    offset += len + 2;
+}
+```
+
+### JSON output
+
+DJI detections are emitted in the same schema as OpenDroneID detections, with two additions (`id_type` and `home_lat`/`home_long`):
+
+```json
+{
+  "mac": "aa:bb:cc:dd:ee:ff",
+  "rssi": -72,
+  "id_type": "DJI",
+  "basic_id": "1ZNBKXXXXXXXX",
+  "drone_lat": 22.319800,
+  "drone_long": 114.169500,
+  "drone_altitude": 35,
+  "height": 28,
+  "home_lat": 22.318100,
+  "home_long": 114.168900,
+  "pilot_lat": 22.318100,
+  "pilot_long": 114.168900,
+  "product_type": 68
+}
+```
+
+`pilot_lat`/`pilot_long` are set to the home-point coordinates (the best available operator-position proxy in the IE221 payload; the live operator GPS carried in OpenDroneID's System message has no equivalent in DJI's Wi-Fi IE). `mesh-mapper.py` requires no changes to plot DJI tracks.
+
+### `dji_droneid_t` fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `serial` | `char[17]` | 16-char aircraft serial number |
+| `lat`, `lon` | `double` | Aircraft position (degrees) |
+| `home_lat`, `home_lon` | `double` | Home/takeoff point (degrees) |
+| `altitude` | `int16_t` | Barometric altitude (m) |
+| `height` | `int16_t` | Height AGL (m) |
+| `v_north`, `v_east`, `v_up` | `int16_t` | Velocity components (raw int16, ~cm/s) |
+| `yaw` | `double` | Heading (radians) |
+| `product_type` | `uint8_t` | Numeric model ID (DJI internal) |
+| `uuid` | `char[21]` | Up to 20-byte UUID string |
+| `state_info` | `uint16_t` | Bitfield: bit 0 = serial valid, bit 5 = in air |
 
 ---
 
@@ -477,7 +555,6 @@ POST /api/node_location  { "node_id": "RX01", "lat": 25.7617, "lon": -80.1918 }
 
 Differences from RemoteID detections:
 - `type: "analog_fm"` is logged at INFO level with band/channel/RSSI.
-- FAA registration lookup is **skipped** (synthetic MAC cannot match the FAA DB).
 - Range rings are colored by signal strength: green ≥ 3000, amber ≥ 2200, red below.
 - Each detection is also forwarded to ATAK/WinTAK as two CoT events: a `a-u-G-E-S` sensor marker and a `u-r-b-c-c` range ring shape.
 
