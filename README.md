@@ -19,6 +19,9 @@
 
 ## 🎯 **Overview**
 
+Special thanks to "Alik", 93rd OMBR; and "Ivan", 427th UAS Brigade, Armed Forces of Ukraine, for their help.
+Slava Ukraini.
+
 Advanced drone detection system that captures and maps Remote ID broadcasts from drones using ESP32 hardware. Features real-time web interface, persistent tracking across sessions, and comprehensive data export capabilities.
 
 Original code by Luke Switzer and ColonelPanic. Currently prototyping RX5808 integration for analog 5.8 GHz FM scanning.
