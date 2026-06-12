@@ -15,9 +15,15 @@
 #include <esp_timer.h>
 #include <set>
 #include <string>
+#include <BLEDevice.h>
+#include <BLEUtils.h>
+#include <BLEScan.h>
+#include <freertos/task.h>
+#include <freertos/semphr.h>
 #include "opendroneid.h"
 #include "odid_wifi.h"
 #include "dji_droneid.h"
+#include "bt_odid.h"
 
 // Custom UART pin definitions for Serial1
 const int SERIAL1_RX_PIN = 7;  // GPIO7
@@ -74,6 +80,8 @@ void callback(void *, wifi_promiscuous_pkt_type_t);
 void parse_odid(struct uav_data *, ODID_UAS_Data *);
 void store_mac(struct uav_data *uav, uint8_t *payload);
 void send_json_detection(struct uav_data *UAV); // existing function
+void send_json_fast(struct uav_data *UAV);
+void print_compact_message(struct uav_data *UAV);
 
 // Global packet counter
 static int packetCount = 0;
@@ -82,8 +90,79 @@ static int packetCount = 0;
 unsigned long last_status = 0;
 unsigned long current_millis = 0;
 
+static BLEScan *pBLEScan = nullptr;
+static SemaphoreHandle_t g_serial_mux = nullptr;
+
 void event_handler(void *ctx, esp_event_base_t event_base, int32_t event_id, void *event_data) {
   // No-op handler for now
+}
+
+// BLE callback: decodes a single ODID message from each advertisement.
+class MyAdvertisedDeviceCallbacks : public BLEAdvertisedDeviceCallbacks {
+public:
+  void onResult(BLEAdvertisedDevice device) override {
+    int adv_len = device.getPayloadLength();
+    if (adv_len <= 0) return;
+    uint8_t *adv = device.getPayload();
+
+    const uint8_t *msgs;
+    int msgs_len;
+    if (!bt_odid_find_odid(adv, adv_len, &msgs, &msgs_len) || msgs_len < 1) return;
+
+    uav_data *UAV = (uav_data *)malloc(sizeof(uav_data));
+    if (!UAV) return;
+    memset(UAV, 0, sizeof(uav_data));
+
+    uint8_t *mac = (uint8_t *)device.getAddress().getNative();
+    memcpy(UAV->mac, mac, 6);
+    UAV->rssi = device.getRSSI();
+
+    const uint8_t *odid = msgs;
+    switch (odid[0] & 0xF0) {
+      case 0x00: {
+        ODID_BasicID_data basic;
+        decodeBasicIDMessage(&basic, (ODID_BasicID_encoded *)odid);
+        strncpy(UAV->uav_id, (char *)basic.UASID, ODID_ID_SIZE);
+        break;
+      }
+      case 0x10: {
+        ODID_Location_data loc;
+        decodeLocationMessage(&loc, (ODID_Location_encoded *)odid);
+        UAV->lat_d = loc.Latitude;
+        UAV->long_d = loc.Longitude;
+        UAV->altitude_msl = (int)loc.AltitudeGeo;
+        UAV->height_agl = (int)loc.Height;
+        UAV->speed = (int)loc.SpeedHorizontal;
+        UAV->heading = (int)loc.Direction;
+        break;
+      }
+      case 0x40: {
+        ODID_System_data sys;
+        decodeSystemMessage(&sys, (ODID_System_encoded *)odid);
+        UAV->base_lat_d = sys.OperatorLatitude;
+        UAV->base_long_d = sys.OperatorLongitude;
+        break;
+      }
+      case 0x50: {
+        ODID_OperatorID_data op;
+        decodeOperatorIDMessage(&op, (ODID_OperatorID_encoded *)odid);
+        strncpy(UAV->op_id, (char *)op.OperatorId, ODID_ID_SIZE);
+        break;
+      }
+    }
+
+    send_json_fast(UAV);
+    print_compact_message(UAV);
+    free(UAV);
+  }
+};
+
+void bleScanTask(void *parameter) {
+  for (;;) {
+    pBLEScan->start(1, false);
+    pBLEScan->clearResults();
+    delay(100);
+  }
 }
 
 // Initialize USB Serial (for JSON output) and Serial1 (
@@ -110,14 +189,25 @@ void setup() {
   esp_wifi_set_promiscuous(true);
   esp_wifi_set_promiscuous_rx_cb(&callback);
   esp_wifi_set_channel(6, WIFI_SECOND_CHAN_NONE);
+
+  g_serial_mux = xSemaphoreCreateMutex();
+
+  BLEDevice::init("DroneID");
+  pBLEScan = BLEDevice::getScan();
+  pBLEScan->setAdvertisedDeviceCallbacks(new MyAdvertisedDeviceCallbacks());
+  pBLEScan->setActiveScan(true);
+  pBLEScan->setInterval(100);
+  pBLEScan->setWindow(99);
+  xTaskCreatePinnedToCore(bleScanTask, "BLEScanTask", 10000, NULL, 1, NULL, 1);
 }
 
 void loop() {
   delay(10);
   current_millis = millis();
   if ((current_millis - last_status) > 60000UL) { // Every 60 seconds
-    // Send a heartbeat as JSON (optional)
+    if (g_serial_mux) xSemaphoreTake(g_serial_mux, pdMS_TO_TICKS(100));
     Serial.println("{\"heartbeat\":\"Device is active and running.\"}");
+    if (g_serial_mux) xSemaphoreGive(g_serial_mux);
     last_status = current_millis;
   }
 }
@@ -132,7 +222,9 @@ void send_json_detection(struct uav_data *UAV) {
   snprintf(json_msg, sizeof(json_msg),
     "{\"mac\":\"%s\", \"rssi\":%d, \"drone_lat\":%.6f, \"drone_long\":%.6f, \"drone_altitude\":%d, \"pilot_lat\":%.6f, \"pilot_long\":%.6f, \"basic_id\":\"%s\"}",
     mac_str, UAV->rssi, UAV->lat_d, UAV->long_d, UAV->altitude_msl, UAV->base_lat_d, UAV->base_long_d, UAV->uav_id);
+  if (g_serial_mux) xSemaphoreTake(g_serial_mux, pdMS_TO_TICKS(100));
   Serial.println(json_msg);
+  if (g_serial_mux) xSemaphoreGive(g_serial_mux);
 }
 
 // New function: sends JSON payload as fast as possible over USB Serial (updated to include basic_id).
@@ -145,7 +237,9 @@ void send_json_fast(struct uav_data *UAV) {
   snprintf(json_msg, sizeof(json_msg),
     "{\"mac\":\"%s\", \"rssi\":%d, \"drone_lat\":%.6f, \"drone_long\":%.6f, \"drone_altitude\":%d, \"pilot_lat\":%.6f, \"pilot_long\":%.6f, \"basic_id\":\"%s\"}",
     mac_str, UAV->rssi, UAV->lat_d, UAV->long_d, UAV->altitude_msl, UAV->base_lat_d, UAV->base_long_d, UAV->uav_id);
+  if (g_serial_mux) xSemaphoreTake(g_serial_mux, pdMS_TO_TICKS(100));
   Serial.println(json_msg);
+  if (g_serial_mux) xSemaphoreGive(g_serial_mux);
 }
 
 // Sends UART messages over Serial1 exactly as before.
@@ -228,7 +322,9 @@ void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
           if (dji_parse_droneid(&payload[offset + 5], len - 3, &dji)) {
             char djijson[384];
             dji_emit_json(currentUAV->mac, currentUAV->rssi, &dji, djijson, sizeof(djijson));
+            if (g_serial_mux) xSemaphoreTake(g_serial_mux, pdMS_TO_TICKS(100));
             Serial.println(djijson);
+            if (g_serial_mux) xSemaphoreGive(g_serial_mux);
             /* Full JSON (~300 B) exceeds Meshtastic MTU (~228 B); send compact relay instead */
             static unsigned long dji_last_mesh = 0;
             if (millis() - dji_last_mesh >= 5000) {

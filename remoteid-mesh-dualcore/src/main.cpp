@@ -14,6 +14,7 @@
 #include "opendroneid.h"
 #include "odid_wifi.h"
 #include "dji_droneid.h"
+#include "bt_odid.h"
 #include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -65,58 +66,57 @@ id_data* next_uav(uint8_t* mac) {
 class MyAdvertisedDeviceCallbacks : public BLEAdvertisedDeviceCallbacks {
 public:
   void onResult(BLEAdvertisedDevice device) override {
-    int len = device.getPayloadLength();
-    if (len <= 0) return;
-      
-    uint8_t* payload = device.getPayload();
-    if (len > 5 && payload[1] == 0x16 && payload[2] == 0xFA && 
-        payload[3] == 0xFF && payload[4] == 0x0D) {
-      uint8_t* mac = (uint8_t*) device.getAddress().getNative();
-      id_data* UAV = next_uav(mac);
-      UAV->last_seen = millis();
-      UAV->rssi = device.getRSSI();
-      memcpy(UAV->mac, mac, 6);
-      
-      uint8_t* odid = &payload[6];
-      switch (odid[0] & 0xF0) {
-        case 0x00: {
-          ODID_BasicID_data basic;
-          decodeBasicIDMessage(&basic, (ODID_BasicID_encoded*) odid);
-          strncpy(UAV->uav_id, (char*) basic.UASID, ODID_ID_SIZE);
-          break;
-        }
-        case 0x10: {
-          ODID_Location_data loc;
-          decodeLocationMessage(&loc, (ODID_Location_encoded*) odid);
-          UAV->lat_d = loc.Latitude;
-          UAV->long_d = loc.Longitude;
-          UAV->altitude_msl = (int) loc.AltitudeGeo;
-          UAV->height_agl = (int) loc.Height;
-          UAV->speed = (int) loc.SpeedHorizontal;
-          UAV->heading = (int) loc.Direction;
-          break;
-        }
-        case 0x40: {
-          ODID_System_data sys;
-          decodeSystemMessage(&sys, (ODID_System_encoded*) odid);
-          UAV->base_lat_d = sys.OperatorLatitude;
-          UAV->base_long_d = sys.OperatorLongitude;
-          break;
-        }
-        case 0x50: {
-          ODID_OperatorID_data op;
-          decodeOperatorIDMessage(&op, (ODID_OperatorID_encoded*) odid);
-          strncpy(UAV->op_id, (char*) op.OperatorId, ODID_ID_SIZE);
-          break;
-        }
+    int adv_len = device.getPayloadLength();
+    if (adv_len <= 0) return;
+    uint8_t *adv = device.getPayload();
+
+    const uint8_t *msgs;
+    int msgs_len;
+    if (!bt_odid_find_odid(adv, adv_len, &msgs, &msgs_len) || msgs_len < 1) return;
+
+    uint8_t *mac = (uint8_t *)device.getAddress().getNative();
+    id_data *UAV = next_uav(mac);
+    UAV->last_seen = millis();
+    UAV->rssi = device.getRSSI();
+    memcpy(UAV->mac, mac, 6);
+
+    const uint8_t *odid = msgs;
+    switch (odid[0] & 0xF0) {
+      case 0x00: {
+        ODID_BasicID_data basic;
+        decodeBasicIDMessage(&basic, (ODID_BasicID_encoded *)odid);
+        strncpy(UAV->uav_id, (char *)basic.UASID, ODID_ID_SIZE);
+        break;
       }
-      UAV->flag = 1;
-      {
-        id_data tmp = *UAV;
-        BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-        xQueueSendFromISR(printQueue, &tmp, &xHigherPriorityTaskWoken);
-        if (xHigherPriorityTaskWoken) portYIELD_FROM_ISR();
+      case 0x10: {
+        ODID_Location_data loc;
+        decodeLocationMessage(&loc, (ODID_Location_encoded *)odid);
+        UAV->lat_d = loc.Latitude;
+        UAV->long_d = loc.Longitude;
+        UAV->altitude_msl = (int)loc.AltitudeGeo;
+        UAV->height_agl = (int)loc.Height;
+        UAV->speed = (int)loc.SpeedHorizontal;
+        UAV->heading = (int)loc.Direction;
+        break;
       }
+      case 0x40: {
+        ODID_System_data sys;
+        decodeSystemMessage(&sys, (ODID_System_encoded *)odid);
+        UAV->base_lat_d = sys.OperatorLatitude;
+        UAV->base_long_d = sys.OperatorLongitude;
+        break;
+      }
+      case 0x50: {
+        ODID_OperatorID_data op;
+        decodeOperatorIDMessage(&op, (ODID_OperatorID_encoded *)odid);
+        strncpy(UAV->op_id, (char *)op.OperatorId, ODID_ID_SIZE);
+        break;
+      }
+    }
+    UAV->flag = 1;
+    {
+      id_data tmp = *UAV;
+      xQueueSend(printQueue, &tmp, 0);
     }
   }
 };
@@ -233,9 +233,7 @@ void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
       storedUAV->flag = 1;
       {
         id_data tmp = *storedUAV;
-        BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-        xQueueSendFromISR(printQueue, &tmp, &xHigherPriorityTaskWoken);
-        if (xHigherPriorityTaskWoken) portYIELD_FROM_ISR();
+        xQueueSend(printQueue, &tmp, 0);
       }
     }
   }
@@ -311,9 +309,7 @@ void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
             storedUAV->flag = 1;
             {
               id_data tmp = *storedUAV;
-              BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-              xQueueSendFromISR(printQueue, &tmp, &xHigherPriorityTaskWoken);
-              if (xHigherPriorityTaskWoken) portYIELD_FROM_ISR();
+              xQueueSend(printQueue, &tmp, 0);
             }
           }
         }
