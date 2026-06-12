@@ -1284,7 +1284,9 @@ def should_trigger_webhook_earliest(detection, mac):
     valid_drone = (drone_lat != 0 and drone_long != 0)
     has_gps = valid_drone or (pilot_lat != 0 and pilot_long != 0)
     has_recent_transmission = detection.get('last_update') and (current_time - detection['last_update'] <= 5)
-    is_no_gps_drone = not has_gps and has_recent_transmission
+    is_no_gps_drone = (not has_gps and has_recent_transmission
+                       and detection.get('type') != 'analog_fm'
+                       and detection.get('id_type') != 'DJI')
     
     # Calculate state
     active_now = valid_drone and detection.get('last_update') and (current_time - detection['last_update'] <= 30)
@@ -3549,7 +3551,7 @@ async function updateData() {
       // ALSO handle no-GPS drones here in centralized popup logic
       const hasGps = validDrone || (pilotLat !== 0 && pilotLng !== 0);
       const hasRecentTransmission = det.last_update && (currentTime - det.last_update <= 5);
-      const isNoGpsDrone = !hasGps && hasRecentTransmission && det.type !== 'analog_fm';
+      const isNoGpsDrone = !hasGps && hasRecentTransmission && det.type !== 'analog_fm' && det.id_type !== 'DJI';
       
       let shouldShowPopup = false;
       let popupIsNew = false;
