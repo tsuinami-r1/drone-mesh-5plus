@@ -342,22 +342,24 @@ void setup() {
   
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
-  
-  esp_wifi_set_promiscuous(true);
-  esp_wifi_set_promiscuous_rx_cb(&callback);
-  esp_wifi_set_channel(6, WIFI_SECOND_CHAN_NONE);
-  
+
   BLEDevice::init("DroneID");
   pBLEScan = BLEDevice::getScan();
   pBLEScan->setAdvertisedDeviceCallbacks(new MyAdvertisedDeviceCallbacks());
   pBLEScan->setActiveScan(true);
 
   printQueue = xQueueCreate(MAX_UAVS, sizeof(id_data));
-  
+
+  /* Enable promiscuous mode AFTER printQueue is created so the callback
+   * never calls xQueueSend on a NULL handle. */
+  esp_wifi_set_promiscuous(true);
+  esp_wifi_set_promiscuous_rx_cb(&callback);
+  esp_wifi_set_channel(6, WIFI_SECOND_CHAN_NONE);
+
   xTaskCreatePinnedToCore(bleScanTask, "BLEScanTask", 10000, NULL, 1, NULL, 1);
   xTaskCreatePinnedToCore(wifiProcessTask, "WiFiProcessTask", 10000, NULL, 1, NULL, 0);
   xTaskCreatePinnedToCore(printerTask, "PrinterTask", 10000, NULL, 1, NULL, 1);
-  
+
   memset(uavs, 0, sizeof(uavs));
 }
 

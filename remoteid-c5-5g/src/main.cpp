@@ -403,10 +403,10 @@ void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
   // Get current channel/band info (thread-safe)
   uint8_t detect_channel;
   WiFiBand detect_band;
-  portENTER_CRITICAL_ISR(&channelMux);
+  portENTER_CRITICAL(&channelMux);
   detect_channel = current_channel;
   detect_band = current_band;
-  portEXIT_CRITICAL_ISR(&channelMux);
+  portEXIT_CRITICAL(&channelMux);
 
   // NAN Action Frame (WiFi Aware RemoteID)
   static const uint8_t nan_dest[6] = {0x51, 0x6f, 0x9a, 0x01, 0x00, 0x00};
