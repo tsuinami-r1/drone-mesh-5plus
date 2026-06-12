@@ -436,7 +436,7 @@ void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
       if (offset + 2 + len > length) break;
       if (typ == 0xdd && len >= 4) {
         /* DJI DroneID OUI 26:37:12 */
-        if (payload[offset+2] == 0x26 && payload[offset+3] == 0x37 && payload[offset+4] == 0x12) {
+        if (dji_is_oui(&payload[offset+2])) {
           dji_droneid_t dji;
           uint8_t src_mac[6];
           memcpy(src_mac, &payload[10], 6);
@@ -444,6 +444,22 @@ void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
             char djijson[384];
             dji_emit_json(src_mac, packet->rx_ctrl.rssi, &dji, djijson, sizeof(djijson));
             Serial.println(djijson);
+            /* Full JSON (~300 B) exceeds Meshtastic MTU (~228 B); send compact relay instead */
+            static unsigned long dji_last_mesh = 0;
+            if (millis() - dji_last_mesh >= 5000) {
+              char mesh_buf[200];
+              int n = snprintf(mesh_buf, sizeof(mesh_buf),
+                               "DJI %02x%02x%02x%02x%02x%02x RSSI:%d",
+                               src_mac[0], src_mac[1], src_mac[2],
+                               src_mac[3], src_mac[4], src_mac[5],
+                               (int)packet->rx_ctrl.rssi);
+              if (dji.lat != 0.0 && dji.lon != 0.0 && n < (int)sizeof(mesh_buf) - 2)
+                n += snprintf(mesh_buf + n, sizeof(mesh_buf) - n,
+                              " https://maps.google.com/?q=%.6f,%.6f", dji.lat, dji.lon);
+              if (Serial1.availableForWrite() >= n + 2)
+                Serial1.println(mesh_buf);
+              dji_last_mesh = millis();
+            }
           }
         }
         /* OpenDroneID OUIs FA:0B:BC and 90:3A:E6 */

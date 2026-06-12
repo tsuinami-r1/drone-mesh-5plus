@@ -65,6 +65,24 @@ static inline int32_t  dji_i32(const uint8_t *p) {
                      ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24));
 }
 
+/* Use in callbacks instead of repeating inline byte literals. */
+static inline bool dji_is_oui(const uint8_t *p) {
+    return p[0] == DJI_OUI[0] && p[1] == DJI_OUI[1] && p[2] == DJI_OUI[2];
+}
+
+/* JSON-safe copy: escapes backslash and double-quote so d->serial is safe in JSON strings. */
+static inline void dji_escape_str(const char *src, char *dst, size_t dstlen) {
+    size_t i = 0, j = 0;
+    while (src[i] && j + 2 < dstlen) {
+        if (src[i] == '"' || src[i] == '\\') {
+            if (j + 3 >= dstlen) break;
+            dst[j++] = '\\';
+        }
+        dst[j++] = src[i++];
+    }
+    dst[j] = '\0';
+}
+
 /*
  * payload     = bytes AFTER the 3-byte OUI, i.e. starting at vendor_type.
  * payload_len = IE tag length minus the 3 OUI bytes.
@@ -141,6 +159,8 @@ static inline void dji_emit_json(const uint8_t mac[6], int8_t rssi,
                                  const dji_droneid_t *d,
                                  char *buf, size_t buflen)
 {
+    char serial_esc[34]; /* 16 bytes worst-case doubled + NUL */
+    dji_escape_str(d->serial, serial_esc, sizeof(serial_esc));
     snprintf(buf, buflen,
         "{\"mac\":\"%02x:%02x:%02x:%02x:%02x:%02x\",\"rssi\":%d,"
         "\"id_type\":\"DJI\",\"basic_id\":\"%s\","
@@ -148,7 +168,7 @@ static inline void dji_emit_json(const uint8_t mac[6], int8_t rssi,
         "\"height\":%d,\"home_lat\":%.6f,\"home_long\":%.6f,"
         "\"pilot_lat\":%.6f,\"pilot_long\":%.6f,\"product_type\":%d}",
         mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], rssi,
-        d->serial,
+        serial_esc,
         d->lat, d->lon, d->altitude,
         d->height, d->home_lat, d->home_lon,
         d->home_lat, d->home_lon,        /* pilot_* = home (proxy) */
