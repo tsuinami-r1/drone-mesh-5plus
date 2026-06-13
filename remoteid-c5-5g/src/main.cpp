@@ -351,16 +351,6 @@ void bleScanTask(void *parameter) {
 }
 
 // ============================================================================
-// WiFi Process Task (keeps promiscuous callback alive)
-// ============================================================================
-
-void wifiProcessTask(void *parameter) {
-  for (;;) {
-    delay(10);
-  }
-}
-
-// ============================================================================
 // WiFi Promiscuous Mode Callback
 // ============================================================================
 
@@ -553,14 +543,12 @@ void setup() {
   // FreeRTOS tasks — C5 is single-core, S3 is dual-core
 #if SINGLE_CORE
   xTaskCreate(bleScanTask, "BLEScanTask", 10000, NULL, 1, NULL);
-  xTaskCreate(wifiProcessTask, "WiFiProcessTask", 10000, NULL, 1, NULL);
   xTaskCreate(printerTask, "PrinterTask", 10000, NULL, 1, NULL);
   #if DUAL_BAND_ENABLED
   xTaskCreate(channelHopTask, "ChannelHopTask", 4096, NULL, 2, NULL);
   #endif
 #else
   xTaskCreatePinnedToCore(bleScanTask, "BLEScanTask", 10000, NULL, 1, NULL, 1);
-  xTaskCreatePinnedToCore(wifiProcessTask, "WiFiProcessTask", 10000, NULL, 1, NULL, 0);
   xTaskCreatePinnedToCore(printerTask, "PrinterTask", 10000, NULL, 1, NULL, 1);
 #endif
 

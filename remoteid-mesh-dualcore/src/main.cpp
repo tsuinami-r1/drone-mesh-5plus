@@ -174,23 +174,18 @@ void print_compact_message(const id_data *UAV) {
 
 void bleScanTask(void *parameter) {
   for (;;) {
-    BLEScanResults* foundDevices = pBLEScan->start(1, false);
+    pBLEScan->start(1, false);
     pBLEScan->clearResults();
-    for (int i = 0; i < MAX_UAVS; i++) {
-      if (uavs[i].flag) {
-        // Removed send_json_fast and print_compact_message calls here
-        uavs[i].flag = 0;
-      }
-    }
     delay(100);
   }
 }
 
-void wifiProcessTask(void *parameter) {
-  for (;;) {
-    // No-op: callback sets uavs[].flag and data, so nothing needed here
-    delay(10);
-  }
+static void storeAndQueue(id_data *UAV) {
+  id_data *storedUAV = next_uav(UAV->mac);
+  *storedUAV = *UAV;
+  storedUAV->flag = 1;
+  id_data tmp = *storedUAV;
+  xQueueSend(printQueue, &tmp, 0);
 }
 
 void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
@@ -228,13 +223,7 @@ void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
         strncpy(UAV.op_id, (char *)UAS_data.OperatorID.OperatorId, ODID_ID_SIZE);
       }
       
-      id_data* storedUAV = next_uav(UAV.mac);
-      *storedUAV = UAV;
-      storedUAV->flag = 1;
-      {
-        id_data tmp = *storedUAV;
-        xQueueSend(printQueue, &tmp, 0);
-      }
+      storeAndQueue(&UAV);
     }
   }
   else if (payload[0] == 0x80) {
@@ -304,13 +293,7 @@ void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
               strncpy(UAV.op_id, (char *)UAS_data.OperatorID.OperatorId, ODID_ID_SIZE);
             }
 
-            id_data* storedUAV = next_uav(UAV.mac);
-            *storedUAV = UAV;
-            storedUAV->flag = 1;
-            {
-              id_data tmp = *storedUAV;
-              xQueueSend(printQueue, &tmp, 0);
-            }
+            storeAndQueue(&UAV);
           }
         }
       }
@@ -325,7 +308,6 @@ void printerTask(void *param) {
     if (xQueueReceive(printQueue, &UAV, portMAX_DELAY)) {
       send_json_fast(&UAV);
       print_compact_message(&UAV);
-      // no need to reset flag on copy
     }
   }
 }
@@ -357,7 +339,6 @@ void setup() {
   esp_wifi_set_channel(6, WIFI_SECOND_CHAN_NONE);
 
   xTaskCreatePinnedToCore(bleScanTask, "BLEScanTask", 10000, NULL, 1, NULL, 1);
-  xTaskCreatePinnedToCore(wifiProcessTask, "WiFiProcessTask", 10000, NULL, 1, NULL, 0);
   xTaskCreatePinnedToCore(printerTask, "PrinterTask", 10000, NULL, 1, NULL, 1);
 
   memset(uavs, 0, sizeof(uavs));

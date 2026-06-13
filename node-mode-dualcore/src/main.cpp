@@ -289,12 +289,11 @@ void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
   }
 }
 
-// BLE scanning task running on core 0
 void bleScanTask(void *parameter) {
   for(;;) {
-    BLEScanResults* foundDevices = pBLEScan->start(1, false);
+    pBLEScan->start(1, false);
     pBLEScan->clearResults();
-    
+
     for (int i = 0; i < MAX_UAVS; i++) {
       if (uavs[i].flag) {
         send_json_fast(&uavs[i]);
@@ -302,29 +301,14 @@ void bleScanTask(void *parameter) {
         uavs[i].flag = 0;
       }
     }
-    
+
     unsigned long current_millis = millis();
     if ((current_millis - last_status) > 60000UL) {
       Serial.println("{\"heartbeat\":\"Device is active and running.\"}");
       last_status = current_millis;
     }
-  
+
     delay(100);
-  }
-}
-
-// Wi-Fi processing task running on core 1
-
-void wifiProcessTask(void *parameter) {
-  for(;;) {
-    for (int i = 0; i < MAX_UAVS; i++) {
-      if (uavs[i].flag) {
-        send_json_fast(&uavs[i]);
-        print_compact_message(&uavs[i]);
-        uavs[i].flag = 0;
-      }
-    }
-    delay(10);
   }
 }
 
@@ -364,9 +348,7 @@ void setup() {
   // Initialize UAV tracking array
   memset(uavs, 0, sizeof(uavs));
   
-  // Create tasks for BLE scanning and Wi-Fi processing on separate cores
   xTaskCreatePinnedToCore(bleScanTask, "BLEScanTask", 10000, NULL, 1, NULL, 0);
-  xTaskCreatePinnedToCore(wifiProcessTask, "WiFiProcessTask", 10000, NULL, 1, NULL, 1);
   xTaskCreatePinnedToCore(uartForwardTask, "UARTForwardTask", 4096, NULL, 1, NULL, 1);
 }
 
