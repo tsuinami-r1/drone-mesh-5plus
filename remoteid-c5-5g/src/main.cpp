@@ -26,6 +26,7 @@
 #include "opendroneid.h"
 #include "odid_wifi.h"
 #include "dji_droneid.h"
+#include "bt_odid.h"
 #include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -159,61 +160,59 @@ class MyAdvertisedDeviceCallbacks : public NimBLEScanCallbacks {
 public:
   void onResult(const NimBLEAdvertisedDevice* device) override {
     const std::vector<uint8_t>& payloadVec = device->getPayload();
-    int len = (int)payloadVec.size();
-    if (len <= 0) return;
+    int adv_len = (int)payloadVec.size();
+    if (adv_len <= 0) return;
+    const uint8_t *adv = payloadVec.data();
 
-    const uint8_t* payload = payloadVec.data();
-    // RemoteID BLE advertisement: Service UUID 0xFFFA, type 0x0D
-    if (len > 5 && payload[1] == 0x16 && payload[2] == 0xFA &&
-        payload[3] == 0xFF && payload[4] == 0x0D) {
-      const uint8_t* mac = device->getAddress().getBase()->val;
-      id_data* UAV = next_uav(mac);
-      UAV->last_seen = millis();
-      UAV->rssi = device->getRSSI();
-      memcpy(UAV->mac, (const uint8_t*)mac, 6);
-      UAV->band = BAND_BLE;
-      UAV->channel = 0;
+    const uint8_t *msgs;
+    int msgs_len;
+    if (!bt_odid_find_odid(adv, adv_len, &msgs, &msgs_len) || msgs_len < 1) return;
 
-      const uint8_t* odid = &payload[6];
-      switch (odid[0] & 0xF0) {
-        case 0x00: {
-          ODID_BasicID_data basic;
-          decodeBasicIDMessage(&basic, (ODID_BasicID_encoded*) odid);
-          strncpy(UAV->uav_id, (char*) basic.UASID, ODID_ID_SIZE);
-          break;
-        }
-        case 0x10: {
-          ODID_Location_data loc;
-          decodeLocationMessage(&loc, (ODID_Location_encoded*) odid);
-          UAV->lat_d = loc.Latitude;
-          UAV->long_d = loc.Longitude;
-          UAV->altitude_msl = (int) loc.AltitudeGeo;
-          UAV->height_agl = (int) loc.Height;
-          UAV->speed = (int) loc.SpeedHorizontal;
-          UAV->heading = (int) loc.Direction;
-          break;
-        }
-        case 0x40: {
-          ODID_System_data sys;
-          decodeSystemMessage(&sys, (ODID_System_encoded*) odid);
-          UAV->base_lat_d = sys.OperatorLatitude;
-          UAV->base_long_d = sys.OperatorLongitude;
-          break;
-        }
-        case 0x50: {
-          ODID_OperatorID_data op;
-          decodeOperatorIDMessage(&op, (ODID_OperatorID_encoded*) odid);
-          strncpy(UAV->op_id, (char*) op.OperatorId, ODID_ID_SIZE);
-          break;
-        }
+    const uint8_t *mac = device->getAddress().getBase()->val;
+    id_data *UAV = next_uav(mac);
+    UAV->last_seen = millis();
+    UAV->rssi = device->getRSSI();
+    memcpy(UAV->mac, mac, 6);
+    UAV->band = BAND_BLE;
+    UAV->channel = 0;
+
+    const uint8_t *odid = msgs;
+    switch (odid[0] & 0xF0) {
+      case 0x00: {
+        ODID_BasicID_data basic;
+        decodeBasicIDMessage(&basic, (ODID_BasicID_encoded *)odid);
+        strncpy(UAV->uav_id, (char *)basic.UASID, ODID_ID_SIZE);
+        break;
       }
-      UAV->flag = 1;
-      {
-        id_data tmp = *UAV;
-        BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-        xQueueSendFromISR(printQueue, &tmp, &xHigherPriorityTaskWoken);
-        if (xHigherPriorityTaskWoken) portYIELD_FROM_ISR();
+      case 0x10: {
+        ODID_Location_data loc;
+        decodeLocationMessage(&loc, (ODID_Location_encoded *)odid);
+        UAV->lat_d = loc.Latitude;
+        UAV->long_d = loc.Longitude;
+        UAV->altitude_msl = (int)loc.AltitudeGeo;
+        UAV->height_agl = (int)loc.Height;
+        UAV->speed = (int)loc.SpeedHorizontal;
+        UAV->heading = (int)loc.Direction;
+        break;
       }
+      case 0x40: {
+        ODID_System_data sys;
+        decodeSystemMessage(&sys, (ODID_System_encoded *)odid);
+        UAV->base_lat_d = sys.OperatorLatitude;
+        UAV->base_long_d = sys.OperatorLongitude;
+        break;
+      }
+      case 0x50: {
+        ODID_OperatorID_data op;
+        decodeOperatorIDMessage(&op, (ODID_OperatorID_encoded *)odid);
+        strncpy(UAV->op_id, (char *)op.OperatorId, ODID_ID_SIZE);
+        break;
+      }
+    }
+    UAV->flag = 1;
+    {
+      id_data tmp = *UAV;
+      xQueueSend(printQueue, &tmp, 0);
     }
   }
 };
@@ -345,19 +344,9 @@ void channelHopTask(void *parameter) {
 
 void bleScanTask(void *parameter) {
   for (;;) {
-    NimBLEScanResults foundDevices = pBLEScan->getResults(1000, false);
+    pBLEScan->getResults(1000, false);
     pBLEScan->clearResults();
     delay(100);
-  }
-}
-
-// ============================================================================
-// WiFi Process Task (keeps promiscuous callback alive)
-// ============================================================================
-
-void wifiProcessTask(void *parameter) {
-  for (;;) {
-    delay(10);
   }
 }
 
@@ -390,9 +379,7 @@ static void storeAndQueue(id_data* UAV) {
   storedUAV->flag = 1;
   {
     id_data tmp = *storedUAV;
-    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-    xQueueSendFromISR(printQueue, &tmp, &xHigherPriorityTaskWoken);
-    if (xHigherPriorityTaskWoken) portYIELD_FROM_ISR();
+    xQueueSend(printQueue, &tmp, 0);
   }
 }
 
@@ -406,10 +393,10 @@ void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
   // Get current channel/band info (thread-safe)
   uint8_t detect_channel;
   WiFiBand detect_band;
-  portENTER_CRITICAL_ISR(&channelMux);
+  portENTER_CRITICAL(&channelMux);
   detect_channel = current_channel;
   detect_band = current_band;
-  portEXIT_CRITICAL_ISR(&channelMux);
+  portEXIT_CRITICAL(&channelMux);
 
   // NAN Action Frame (WiFi Aware RemoteID)
   static const uint8_t nan_dest[6] = {0x51, 0x6f, 0x9a, 0x01, 0x00, 0x00};
@@ -556,14 +543,12 @@ void setup() {
   // FreeRTOS tasks — C5 is single-core, S3 is dual-core
 #if SINGLE_CORE
   xTaskCreate(bleScanTask, "BLEScanTask", 10000, NULL, 1, NULL);
-  xTaskCreate(wifiProcessTask, "WiFiProcessTask", 10000, NULL, 1, NULL);
   xTaskCreate(printerTask, "PrinterTask", 10000, NULL, 1, NULL);
   #if DUAL_BAND_ENABLED
   xTaskCreate(channelHopTask, "ChannelHopTask", 4096, NULL, 2, NULL);
   #endif
 #else
   xTaskCreatePinnedToCore(bleScanTask, "BLEScanTask", 10000, NULL, 1, NULL, 1);
-  xTaskCreatePinnedToCore(wifiProcessTask, "WiFiProcessTask", 10000, NULL, 1, NULL, 0);
   xTaskCreatePinnedToCore(printerTask, "PrinterTask", 10000, NULL, 1, NULL, 1);
 #endif
 
