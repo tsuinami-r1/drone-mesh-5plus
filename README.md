@@ -7,7 +7,7 @@
 [![ESP32](https://img.shields.io/badge/ESP32-Compatible-green.svg)](https://www.espressif.com/)
 [![Flask](https://img.shields.io/badge/Flask-2.0+-red.svg)](https://flask.palletsprojects.com/)
 
-**Real-time drone detection, mapping, and Remote ID monitoring — ASTM OpenDroneID + DJI DroneID**
+**Real-time drone detection, mapping, and Remote ID monitoring — ASTM OpenDroneID + DJI DroneID + MAVLink**
 
 [🚀 Quick Start](#-quick-start) • [📋 Features](#-features) • [🛠️ API Reference](#-api-reference) • [🔧 Hardware](#-hardware-setup)
 
@@ -35,8 +35,11 @@ Original code by Luke Switzer and ColonelPanic. Currently prototyping RX5808 int
 | ASTM F3411 / OpenDroneID | Wi-Fi NAN action frame | `org.opendroneid.remoteid` hash | All variants |
 | **DJI DroneID** | **802.11 beacon (IE 221)** | **`26:37:12`** | **All variants (this branch)** |
 | DJI OcuSync / O3 / O4 | OFDM (~2.4295 GHz video band) | — | ❌ Requires SDR |
+| **MAVLink GPS** | **802.11 data frame (UDP/14550)** | **any MAC** | **All variants (this branch)** |
 
 > **DJI Wi-Fi coverage caveat:** Modern DJI aircraft (Mini 3 Pro, Air 3, Mavic 3 series) primarily use OcuSync/O3/O4 for their DroneID downlink, which is OFDM in the video band and **cannot be demodulated by an ESP32**. The Wi-Fi IE221 DroneID broadcast (`26:37:12`) is present on older and budget models; treat it as partial fleet coverage, not "all DJI".
+
+> **MAVLink Wi-Fi coverage caveat:** Only detects ArduPilot/PX4 aircraft that broadcast unencrypted MAVLink telemetry over an open Wi-Fi AP (UDP port 14550). DJI and other consumer drones do not use MAVLink. The ESP32 monitors one channel at a time (default: channel 6); aircraft on other channels are missed.
 
 ---
 
@@ -343,6 +346,45 @@ DJI detections are emitted in the same schema as OpenDroneID detections, with tw
 | `product_type` | `uint8_t` | Numeric model ID (DJI internal) |
 | `uuid` | `char[21]` | Up to 20-byte UUID string |
 | `state_info` | `uint16_t` | Bitfield: bit 0 = serial valid, bit 5 = in air |
+
+---
+
+## 📶 **MAVLink GPS over Wi-Fi** (`src/mavlink_wifi.h`)
+
+All four firmware variants passively extract GPS telemetry from unencrypted ArduPilot/PX4 MAVLink broadcasts using the same promiscuous-mode Wi-Fi interface already used for RemoteID.
+
+### How it works
+
+ArduPilot/PX4 survey and inspection drones often create open (unencrypted) Wi-Fi access points and broadcast MAVLink telemetry on UDP port 14550. The ESP32 captures raw 802.11 data frames in promiscuous mode and extracts GPS from `GLOBAL_POSITION_INT` messages (message ID 33) in both MAVLink v1 and v2 framing. No additional hardware is required.
+
+Rejection is fast:
+1. Non-data 802.11 frames → skipped at the first byte
+2. WPA/WEP-protected frames (FC byte 1 bit 0x40) → skipped immediately; avoids any attempt to decode encrypted MSDUs
+3. Non-IPv4, non-UDP, or non-port-14550 frames → skipped
+4. No MAVLink STX byte found → skipped
+
+### JSON output
+
+MAVLink detections emit the same schema as OpenDroneID, with `basic_id` set to `"MAVLink"`:
+
+```json
+{
+  "mac":            "aa:bb:cc:dd:ee:ff",
+  "rssi":           -68,
+  "basic_id":       "MAVLink",
+  "drone_lat":      22.3198,
+  "drone_long":     114.1695,
+  "drone_altitude": 35,
+  "height":         28,
+  "heading":        247
+}
+```
+
+`pilot_lat`/`pilot_long` are absent — `GLOBAL_POSITION_INT` carries only aircraft position. `mesh-mapper.py` requires no changes to display MAVLink tracks.
+
+### Limitation
+
+The ESP32 monitors one Wi-Fi channel at a time (channel 6 by default). Aircraft broadcasting on a different channel are not detected.
 
 ---
 
