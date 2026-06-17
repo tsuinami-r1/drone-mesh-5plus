@@ -72,11 +72,16 @@ def cleanup_old_detections():
     
     for mac, detection in tracked_pairs.items():
         last_update = detection.get('last_update', 0)
-        # Instead of deleting, mark as inactive for very old detections (30+ minutes)
-        if current_time - last_update > staleThreshold * 30:  # 30x stale threshold (30 minutes)
-            detection['status'] = 'inactive_old'  # Mark as very old but keep in session
-        elif current_time - last_update > staleThreshold * 3:  # 3x stale threshold (3 minutes)
-            detection['status'] = 'inactive'  # Mark as inactive but keep in session
+        age = current_time - last_update
+        if detection.get('type') == 'analog_fm':
+            # FPV nodes re-report every ~5 s; 30 s silence = dead node
+            if age > 30:
+                detection['status'] = 'inactive'
+        else:
+            if age > staleThreshold * 30:  # 30 minutes
+                detection['status'] = 'inactive_old'
+            elif age > staleThreshold * 3:  # 3 minutes
+                detection['status'] = 'inactive'
     
     # Prune stale inbound TAK contacts
     with TAK_CONTACTS_LOCK:
@@ -1286,7 +1291,8 @@ def should_trigger_webhook_earliest(detection, mac):
     has_recent_transmission = detection.get('last_update') and (current_time - detection['last_update'] <= 5)
     is_no_gps_drone = (not has_gps and has_recent_transmission
                        and detection.get('type') != 'analog_fm'
-                       and detection.get('id_type') != 'DJI')
+                       and detection.get('id_type') != 'DJI'
+                       and detection.get('basic_id') != 'MAVLink')
     
     # Calculate state
     active_now = valid_drone and detection.get('last_update') and (current_time - detection['last_update'] <= 30)
@@ -3468,7 +3474,7 @@ function updateComboList(data) {
     const hasRecentTransmission = det && det.last_update && ((currentTime - det.last_update) <= 5);
     
     // Apply no-GPS styling only if drone has no GPS AND has recent transmission (within 5 seconds)
-    if (!hasGps && hasRecentTransmission) {
+    if (!hasGps && hasRecentTransmission && det.type !== 'analog_fm' && det.id_type !== 'DJI' && det.basic_id !== 'MAVLink') {
       item.classList.add('no-gps');
     } else {
       item.classList.remove('no-gps');
@@ -3551,7 +3557,7 @@ async function updateData() {
       // ALSO handle no-GPS drones here in centralized popup logic
       const hasGps = validDrone || (pilotLat !== 0 && pilotLng !== 0);
       const hasRecentTransmission = det.last_update && (currentTime - det.last_update <= 5);
-      const isNoGpsDrone = !hasGps && hasRecentTransmission && det.type !== 'analog_fm' && det.id_type !== 'DJI';
+      const isNoGpsDrone = !hasGps && hasRecentTransmission && det.type !== 'analog_fm' && det.id_type !== 'DJI' && det.basic_id !== 'MAVLink';
       
       let shouldShowPopup = false;
       let popupIsNew = false;
@@ -3741,7 +3747,7 @@ async function updateData() {
       const hasGps = det.drone_lat && det.drone_long && det.drone_lat !== 0 && det.drone_long !== 0;
       const hasRecentTransmission = det.last_update && ((currentTime - det.last_update) <= 5);
       
-      if (!hasGps && hasRecentTransmission) {
+      if (!hasGps && hasRecentTransmission && det.type !== 'analog_fm' && det.id_type !== 'DJI' && det.basic_id !== 'MAVLink') {
         // Apply no-GPS styling and one-time alert for drones with no GPS but recent transmission
         droneElem.classList.add('no-gps');
         if (!alertedNoGpsDrones.has(det.mac)) {

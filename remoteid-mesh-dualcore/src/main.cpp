@@ -15,6 +15,7 @@
 #include "odid_wifi.h"
 #include "dji_droneid.h"
 #include "bt_odid.h"
+#include "mavlink_wifi.h"
 #include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -160,7 +161,6 @@ void print_compact_message(const id_data *UAV) {
     Serial1.println(mesh_msg);
   }
   
-  delay(1000);
   if (UAV->base_lat_d != 0.0 && UAV->base_long_d != 0.0) {
     char pilot_msg[MAX_MESH_SIZE];
     int pilot_len = snprintf(pilot_msg, sizeof(pilot_msg),
@@ -189,12 +189,31 @@ static void storeAndQueue(id_data *UAV) {
 }
 
 void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
-  if (type != WIFI_PKT_MGMT) return;
+  if (type != WIFI_PKT_MGMT && type != WIFI_PKT_DATA) return;
   
   wifi_promiscuous_pkt_t *packet = (wifi_promiscuous_pkt_t *)buffer;
   uint8_t *payload = packet->payload;
   int length = packet->rx_ctrl.sig_len;
   
+  if (type == WIFI_PKT_DATA) {
+    uint8_t mav_mac[6];
+    mav_gps_t mav_gps;
+    if (mav_wifi_extract(payload, length, mav_mac, &mav_gps)) {
+      id_data UAV = {};
+      memcpy(UAV.mac, mav_mac, 6);
+      UAV.rssi = packet->rx_ctrl.rssi;
+      UAV.last_seen = millis();
+      UAV.lat_d = mav_gps.lat;
+      UAV.long_d = mav_gps.lon;
+      UAV.altitude_msl = (int)mav_gps.alt_msl;
+      UAV.height_agl = (int)mav_gps.alt_agl;
+      UAV.heading = (int)mav_gps.hdg;
+      strncpy(UAV.uav_id, "MAVLink", ODID_ID_SIZE);
+      storeAndQueue(&UAV);
+    }
+    return;
+  }
+
   static const uint8_t nan_dest[6] = {0x51, 0x6f, 0x9a, 0x01, 0x00, 0x00};
   if (memcmp(nan_dest, &payload[4], 6) == 0) {
     if (odid_wifi_receive_message_pack_nan_action_frame(&UAS_data, nullptr, payload, length) == 0) {

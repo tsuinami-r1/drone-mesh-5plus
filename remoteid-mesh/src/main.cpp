@@ -22,6 +22,7 @@
 #include "odid_wifi.h"
 #include "dji_droneid.h"
 #include "bt_odid.h"
+#include "mavlink_wifi.h"
 
 // Custom UART pin definitions for Serial1
 const int SERIAL1_RX_PIN = 7;  // GPIO7
@@ -182,11 +183,11 @@ void setup() {
   esp_wifi_set_storage(WIFI_STORAGE_RAM);
   esp_wifi_set_mode(WIFI_MODE_NULL);
   esp_wifi_start();
+  g_serial_mux = xSemaphoreCreateMutex();
+
   esp_wifi_set_promiscuous(true);
   esp_wifi_set_promiscuous_rx_cb(&callback);
   esp_wifi_set_channel(6, WIFI_SECOND_CHAN_NONE);
-
-  g_serial_mux = xSemaphoreCreateMutex();
 
   BLEDevice::init("DroneID");
   pBLEScan = BLEDevice::getScan();
@@ -245,7 +246,6 @@ void print_compact_message(struct uav_data *UAV) {
     Serial1.println(mesh_msg);
   }
   
-  delay(1000);
   if (UAV->base_lat_d != 0.0 && UAV->base_long_d != 0.0) {
     char pilot_msg[MAX_MESH_SIZE];
     int pilot_len = snprintf(pilot_msg, sizeof(pilot_msg),
@@ -259,27 +259,44 @@ void print_compact_message(struct uav_data *UAV) {
 
 // WiFi promiscuous callback: processes packets and sends both UART and fast JSON.
 void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
-  if (type != WIFI_PKT_MGMT) return;
+  if (type != WIFI_PKT_MGMT && type != WIFI_PKT_DATA) return;
   
   wifi_promiscuous_pkt_t *packet = (wifi_promiscuous_pkt_t *)buffer;
   uint8_t *payload = packet->payload;
   int length = packet->rx_ctrl.sig_len;
   
-  uav_data *currentUAV = (uav_data *)malloc(sizeof(uav_data));
-  if (!currentUAV) return;
-  memset(currentUAV, 0, sizeof(uav_data));
+  if (type == WIFI_PKT_DATA) {
+    uint8_t mav_mac[6];
+    mav_gps_t mav_gps;
+    if (mav_wifi_extract(payload, length, mav_mac, &mav_gps)) {
+      uav_data UAV = {};
+      memcpy(UAV.mac, mav_mac, 6);
+      UAV.rssi = packet->rx_ctrl.rssi;
+      UAV.lat_d = mav_gps.lat;
+      UAV.long_d = mav_gps.lon;
+      UAV.altitude_msl = (int)mav_gps.alt_msl;
+      UAV.height_agl = (int)mav_gps.alt_agl;
+      UAV.heading = (int)mav_gps.hdg;
+      strncpy(UAV.uav_id, "MAVLink", ODID_ID_SIZE);
+      send_json_fast(&UAV);
+      print_compact_message(&UAV);
+    }
+    return;
+  }
+
+  uav_data UAV = {};
   
-  store_mac(currentUAV, payload);
-  currentUAV->rssi = packet->rx_ctrl.rssi;
+  store_mac(&UAV, payload);
+  UAV.rssi = packet->rx_ctrl.rssi;
   
   static const uint8_t nan_dest[6] = {0x51, 0x6f, 0x9a, 0x01, 0x00, 0x00};
   if (memcmp(nan_dest, &payload[4], 6) == 0) {
     if (odid_wifi_receive_message_pack_nan_action_frame(&UAS_data,
-                                                          (char *)currentUAV->op_id,
+                                                          (char *)UAV.op_id,
                                                           payload, length) == 0) {
-      parse_odid(currentUAV, &UAS_data);
-      print_compact_message(currentUAV);
-      send_json_fast(currentUAV);         // Send JSON messages as fast as possible.
+      parse_odid(&UAV, &UAS_data);
+      print_compact_message(&UAV);
+      send_json_fast(&UAV);         // Send JSON messages as fast as possible.
     }
   }
   else if (payload[0] == 0x80) {
@@ -295,7 +312,7 @@ void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
           dji_droneid_t dji;
           if (dji_parse_droneid(&payload[offset + 5], len - 3, &dji)) {
             char djijson[384];
-            dji_emit_json(currentUAV->mac, currentUAV->rssi, &dji, djijson, sizeof(djijson));
+            dji_emit_json(UAV.mac, UAV.rssi, &dji, djijson, sizeof(djijson));
             serial_println_locked(djijson);
             /* Full JSON (~300 B) exceeds Meshtastic MTU (~228 B); send compact relay instead */
             static unsigned long dji_last_mesh = 0;
@@ -303,9 +320,9 @@ void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
               char mesh_buf[200];
               int n = snprintf(mesh_buf, sizeof(mesh_buf),
                                "DJI %02x%02x%02x%02x%02x%02x RSSI:%d",
-                               currentUAV->mac[0], currentUAV->mac[1], currentUAV->mac[2],
-                               currentUAV->mac[3], currentUAV->mac[4], currentUAV->mac[5],
-                               currentUAV->rssi);
+                               UAV.mac[0], UAV.mac[1], UAV.mac[2],
+                               UAV.mac[3], UAV.mac[4], UAV.mac[5],
+                               UAV.rssi);
               if (dji.lat != 0.0 && dji.lon != 0.0 && n < (int)sizeof(mesh_buf) - 2)
                 n += snprintf(mesh_buf + n, sizeof(mesh_buf) - n,
                               " https://maps.google.com/?q=%.6f,%.6f", dji.lat, dji.lon);
@@ -323,9 +340,9 @@ void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
           if (j < length) {
             memset(&UAS_data, 0, sizeof(UAS_data));
             odid_message_process_pack(&UAS_data, &payload[j], length - j);
-            parse_odid(currentUAV, &UAS_data);
-            print_compact_message(currentUAV);
-            send_json_fast(currentUAV);
+            parse_odid(&UAV, &UAS_data);
+            print_compact_message(&UAV);
+            send_json_fast(&UAV);
             printed = true;
           }
         }
@@ -333,7 +350,6 @@ void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
       offset += len + 2;
     }
   }
-  free(currentUAV);
 }
 
 void parse_odid(uav_data *UAV, ODID_UAS_Data *UAS_data2) {
