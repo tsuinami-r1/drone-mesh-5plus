@@ -17,6 +17,7 @@
 #include "odid_wifi.h"
 #include "dji_droneid.h"
 #include "bt_odid.h"
+#include "mavlink_wifi.h"
 #include <esp_timer.h>
 
 // UART pin definitions for Serial1 on esp32s3
@@ -172,12 +173,31 @@ void print_compact_message(const uav_data *UAV) {
 
 // Wi-Fi promiscuous packet callback
 void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
-  if (type != WIFI_PKT_MGMT) return;
+  if (type != WIFI_PKT_MGMT && type != WIFI_PKT_DATA) return;
   
   wifi_promiscuous_pkt_t *packet = (wifi_promiscuous_pkt_t *)buffer;
   uint8_t *payload = packet->payload;
   int length = packet->rx_ctrl.sig_len;
   
+  if (type == WIFI_PKT_DATA) {
+    uint8_t mav_mac[6];
+    mav_gps_t mav_gps;
+    if (mav_wifi_extract(payload, length, mav_mac, &mav_gps)) {
+      uav_data *UAV = next_uav(mav_mac);
+      memcpy(UAV->mac, mav_mac, 6);
+      UAV->rssi = packet->rx_ctrl.rssi;
+      UAV->last_seen = millis();
+      UAV->lat_d = mav_gps.lat;
+      UAV->long_d = mav_gps.lon;
+      UAV->altitude_msl = (int)mav_gps.alt_msl;
+      UAV->height_agl = (int)mav_gps.alt_agl;
+      UAV->heading = (int)mav_gps.hdg;
+      strncpy(UAV->uav_id, "MAVLink", ODID_ID_SIZE);
+      UAV->flag = 1;
+    }
+    return;
+  }
+
   static const uint8_t nan_dest[6] = {0x51, 0x6f, 0x9a, 0x01, 0x00, 0x00};
   if (memcmp(nan_dest, &payload[4], 6) == 0) {
     if (odid_wifi_receive_message_pack_nan_action_frame(&UAS_data, nullptr, payload, length) == 0) {
