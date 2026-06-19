@@ -163,6 +163,17 @@ void bleScanTask(void *parameter) {
   }
 }
 
+static const uint8_t channels_2_4ghz[] = {1, 6, 11};
+
+void channelHopTask(void *parameter) {
+  uint8_t idx = 0;
+  for (;;) {
+    esp_wifi_set_channel(channels_2_4ghz[idx], WIFI_SECOND_CHAN_NONE);
+    idx = (idx + 1) % (sizeof(channels_2_4ghz) / sizeof(channels_2_4ghz[0]));
+    vTaskDelay(pdMS_TO_TICKS(200));
+  }
+}
+
 // Initialize USB Serial (for JSON output) and Serial1 (
 void initializeSerial() {
   // Initialize USB Serial for JSON payloads.
@@ -196,7 +207,8 @@ void setup() {
   pBLEScan->setActiveScan(true);
   pBLEScan->setInterval(100);
   pBLEScan->setWindow(99);
-  xTaskCreatePinnedToCore(bleScanTask, "BLEScanTask", 10000, NULL, 1, NULL, 1);
+  xTaskCreatePinnedToCore(bleScanTask,    "BLEScanTask",    10000, NULL, 1, NULL, 1);
+  xTaskCreatePinnedToCore(channelHopTask, "ChannelHopTask", 2048,  NULL, 2, NULL, 0);
 }
 
 void loop() {

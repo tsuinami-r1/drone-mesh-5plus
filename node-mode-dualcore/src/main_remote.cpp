@@ -361,6 +361,17 @@ static void wifiProcessTask(void *param) {
   }
 }
 
+static const uint8_t channels_2_4ghz[] = {1, 6, 11};
+
+static void channelHopTask(void *param) {
+  uint8_t idx = 0;
+  for (;;) {
+    esp_wifi_set_channel(channels_2_4ghz[idx], WIFI_SECOND_CHAN_NONE);
+    idx = (idx + 1) % (sizeof(channels_2_4ghz) / sizeof(channels_2_4ghz[0]));
+    vTaskDelay(pdMS_TO_TICKS(200));
+  }
+}
+
 // UART forward task: anything the Heltec sends back gets echoed to USB
 // (mesh acknowledgments, Meshtastic debug output, etc.)
 static void uartForwardTask(void *param) {
@@ -440,6 +451,7 @@ void setup() {
   xTaskCreatePinnedToCore(wifiProcessTask, "WiFi",    10000, NULL, 1, NULL, 0);
   xTaskCreatePinnedToCore(printerTask,     "Print",   10000, NULL, 1, NULL, 1);
   xTaskCreatePinnedToCore(uartForwardTask, "UART_FW",  4096, NULL, 1, NULL, 1);
+  xTaskCreatePinnedToCore(channelHopTask,  "ChHop",   2048,  NULL, 2, NULL, 0);
 
   Serial.println("[REMOTE] All tasks launched - scanning for drones...\n");
 }

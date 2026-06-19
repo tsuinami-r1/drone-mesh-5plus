@@ -181,6 +181,17 @@ void bleScanTask(void *parameter) {
   }
 }
 
+static const uint8_t channels_2_4ghz[] = {1, 6, 11};
+
+void channelHopTask(void *parameter) {
+  uint8_t idx = 0;
+  for (;;) {
+    esp_wifi_set_channel(channels_2_4ghz[idx], WIFI_SECOND_CHAN_NONE);
+    idx = (idx + 1) % (sizeof(channels_2_4ghz) / sizeof(channels_2_4ghz[0]));
+    vTaskDelay(pdMS_TO_TICKS(200));
+  }
+}
+
 static void storeAndQueue(id_data *UAV) {
   id_data *storedUAV = next_uav(UAV->mac);
   *storedUAV = *UAV;
@@ -362,8 +373,9 @@ void setup() {
   esp_wifi_set_promiscuous_rx_cb(&callback);
   esp_wifi_set_channel(6, WIFI_SECOND_CHAN_NONE);
 
-  xTaskCreatePinnedToCore(bleScanTask, "BLEScanTask", 10000, NULL, 1, NULL, 1);
-  xTaskCreatePinnedToCore(printerTask, "PrinterTask", 10000, NULL, 1, NULL, 1);
+  xTaskCreatePinnedToCore(bleScanTask,    "BLEScanTask",    10000, NULL, 1, NULL, 1);
+  xTaskCreatePinnedToCore(printerTask,    "PrinterTask",    10000, NULL, 1, NULL, 1);
+  xTaskCreatePinnedToCore(channelHopTask, "ChannelHopTask", 2048,  NULL, 2, NULL, 0);
 
   memset(uavs, 0, sizeof(uavs));
 }

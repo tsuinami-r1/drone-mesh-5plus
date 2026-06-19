@@ -60,13 +60,12 @@ const int SERIAL1_RX_PIN = 6;   // GPIO6 → Heltec TX
 // Dual-Band Channel Configuration
 // ============================================================================
 
-#define CHANNEL_2_4GHZ 6
+// All channels to scan: 2.4 GHz primary (1/6/11) + 5 GHz UNII-3 (149–165)
+// Dwell 50 ms each → full cycle ≈ 400 ms, revisiting each 2.4 GHz channel ~2.5×/s
+static const uint8_t all_channels[] = {1, 6, 11, 149, 153, 157, 161, 165};
+#define NUM_ALL_CHANNELS (sizeof(all_channels) / sizeof(all_channels[0]))
 
-// 5GHz RemoteID channels (UNII-3 band — commonly used for RemoteID)
-static const uint8_t channels_5ghz[] = {149, 153, 157, 161, 165};
-#define NUM_5GHZ_CHANNELS (sizeof(channels_5ghz) / sizeof(channels_5ghz[0]))
-
-// Dwell time per channel (ms). Total cycle ≈ DWELL_TIME * (1 + NUM_5GHZ_CHANNELS) ≈ 300ms
+// Kept for reference by Serial printf in channelHopTask
 #define DWELL_TIME_MS 50
 
 // ============================================================================
@@ -122,7 +121,7 @@ ODID_UAS_Data UAS_data;
 unsigned long last_status = 0;
 
 // Current channel tracking (for dual-band)
-volatile uint8_t current_channel = CHANNEL_2_4GHZ;
+volatile uint8_t current_channel = 6;  /* channelHopTask updates this */
 volatile WiFiBand current_band = BAND_2_4GHZ;
 static portMUX_TYPE channelMux = portMUX_INITIALIZER_UNLOCKED;
 
@@ -296,44 +295,24 @@ void print_compact_message(const id_data *UAV) {
 
 #if DUAL_BAND_ENABLED
 void channelHopTask(void *parameter) {
-  uint8_t channel_index = 0;
-  bool on_5ghz = false;
-
   Serial.println("[DUAL-BAND] Channel hopping active");
-  Serial.printf("[DUAL-BAND] 2.4GHz ch%d + 5GHz ch", CHANNEL_2_4GHZ);
-  for (int i = 0; i < (int)NUM_5GHZ_CHANNELS; i++) {
-    Serial.printf("%d%s", channels_5ghz[i], (i < (int)NUM_5GHZ_CHANNELS - 1) ? "," : "\n");
+  Serial.print("[DUAL-BAND] Channels: ");
+  for (int i = 0; i < (int)NUM_ALL_CHANNELS; i++) {
+    Serial.printf("%d%s", all_channels[i], (i < (int)NUM_ALL_CHANNELS - 1) ? "," : "\n");
   }
 
+  uint8_t idx = 0;
   for (;;) {
-    uint8_t next_channel;
-    WiFiBand next_band;
-
-    if (!on_5ghz) {
-      // Jump to first 5GHz channel
-      next_channel = channels_5ghz[0];
-      next_band = BAND_5GHZ;
-      channel_index = 0;
-      on_5ghz = true;
-    } else {
-      channel_index++;
-      if (channel_index >= NUM_5GHZ_CHANNELS) {
-        // Return to 2.4GHz
-        next_channel = CHANNEL_2_4GHZ;
-        next_band = BAND_2_4GHZ;
-        on_5ghz = false;
-      } else {
-        next_channel = channels_5ghz[channel_index];
-        next_band = BAND_5GHZ;
-      }
-    }
+    uint8_t ch = all_channels[idx];
+    WiFiBand band = (ch > 20) ? BAND_5GHZ : BAND_2_4GHZ;
 
     portENTER_CRITICAL(&channelMux);
-    current_channel = next_channel;
-    current_band = next_band;
+    current_channel = ch;
+    current_band = band;
     portEXIT_CRITICAL(&channelMux);
 
-    esp_wifi_set_channel(next_channel, WIFI_SECOND_CHAN_NONE);
+    esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
+    idx = (idx + 1) % NUM_ALL_CHANNELS;
     vTaskDelay(pdMS_TO_TICKS(DWELL_TIME_MS));
   }
 }
@@ -549,12 +528,12 @@ void setup() {
   WiFi.disconnect();
   esp_wifi_set_promiscuous(true);
   esp_wifi_set_promiscuous_rx_cb(&callback);
-  esp_wifi_set_channel(CHANNEL_2_4GHZ, WIFI_SECOND_CHAN_NONE);
+  esp_wifi_set_channel(6, WIFI_SECOND_CHAN_NONE);  /* initial; channelHopTask takes over */
 
 #if DUAL_BAND_ENABLED
-  Serial.printf("WiFi promiscuous mode (starting 2.4GHz ch%d, hopping enabled)\n", CHANNEL_2_4GHZ);
+  Serial.println("WiFi promiscuous mode (2.4GHz ch1/6/11 + 5GHz ch149-165, hopping enabled)");
 #else
-  Serial.printf("WiFi promiscuous mode (fixed ch%d)\n", CHANNEL_2_4GHZ);
+  Serial.println("WiFi promiscuous mode (fixed ch6)");
 #endif
 
   // BLE init (NimBLE 2.1.0)
