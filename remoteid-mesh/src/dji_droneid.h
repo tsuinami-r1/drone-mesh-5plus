@@ -73,9 +73,9 @@ static inline bool dji_is_oui(const uint8_t *p) {
 /* JSON-safe copy: escapes backslash and double-quote so d->serial is safe in JSON strings. */
 static inline void dji_escape_str(const char *src, char *dst, size_t dstlen) {
     size_t i = 0, j = 0;
-    while (src[i] && j + 2 < dstlen) {
+    while (src[i] && j + 1 < dstlen) {
         if (src[i] == '"' || src[i] == '\\') {
-            if (j + 3 >= dstlen) break;
+            if (j + 2 >= dstlen) break;
             dst[j++] = '\\';
         }
         dst[j++] = src[i++];

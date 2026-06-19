@@ -90,6 +90,7 @@ public:
         ODID_BasicID_data basic;
         decodeBasicIDMessage(&basic, (ODID_BasicID_encoded *)odid);
         strncpy(UAV->uav_id, (char *)basic.UASID, ODID_ID_SIZE);
+        UAV->uav_id[ODID_ID_SIZE] = '\0';
         break;
       }
       case 0x10: {
@@ -174,11 +175,13 @@ void print_compact_message(const uav_data *UAV) {
 // Wi-Fi promiscuous packet callback
 void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
   if (type != WIFI_PKT_MGMT && type != WIFI_PKT_DATA) return;
-  
+
   wifi_promiscuous_pkt_t *packet = (wifi_promiscuous_pkt_t *)buffer;
   uint8_t *payload = packet->payload;
   int length = packet->rx_ctrl.sig_len;
-  
+
+  if (length < 16) return;   /* too short to safely read addr/NAN fields */
+
   if (type == WIFI_PKT_DATA) {
     uint8_t mav_mac[6];
     mav_gps_t mav_gps;
@@ -209,6 +212,7 @@ void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
       
       if (UAS_data.BasicIDValid[0]) {
         strncpy(UAV.uav_id, (char *)UAS_data.BasicID[0].UASID, ODID_ID_SIZE);
+        UAV.uav_id[ODID_ID_SIZE] = '\0';
       }
       if (UAS_data.LocationValid) {
         UAV.lat_d = UAS_data.Location.Latitude;
@@ -281,6 +285,7 @@ void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
 
             if (UAS_data.BasicIDValid[0]) {
               strncpy(UAV.uav_id, (char *)UAS_data.BasicID[0].UASID, ODID_ID_SIZE);
+              UAV.uav_id[ODID_ID_SIZE] = '\0';
             }
             if (UAS_data.LocationValid) {
               UAV.lat_d = UAS_data.Location.Latitude;

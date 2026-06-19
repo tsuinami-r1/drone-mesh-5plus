@@ -183,6 +183,7 @@ public:
         ODID_BasicID_data basic;
         decodeBasicIDMessage(&basic, (ODID_BasicID_encoded *)odid);
         strncpy(UAV->uav_id, (char *)basic.UASID, ODID_ID_SIZE);
+        UAV->uav_id[ODID_ID_SIZE] = '\0';
         break;
       }
       case 0x10: {
@@ -357,6 +358,7 @@ void bleScanTask(void *parameter) {
 static void processODIDData(id_data* UAV) {
   if (UAS_data.BasicIDValid[0])
     strncpy(UAV->uav_id, (char *)UAS_data.BasicID[0].UASID, ODID_ID_SIZE);
+  UAV->uav_id[ODID_ID_SIZE] = '\0';
   if (UAS_data.LocationValid) {
     UAV->lat_d = UAS_data.Location.Latitude;
     UAV->long_d = UAS_data.Location.Longitude;
@@ -398,6 +400,8 @@ void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
   detect_band = current_band;
   portEXIT_CRITICAL(&channelMux);
 
+  if (length < 16) return;   /* too short to safely read addr/NAN fields */
+
   if (type == WIFI_PKT_DATA) {
     uint8_t mav_mac[6];
     mav_gps_t mav_gps;
@@ -422,8 +426,7 @@ void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
   // NAN Action Frame (WiFi Aware RemoteID)
   static const uint8_t nan_dest[6] = {0x51, 0x6f, 0x9a, 0x01, 0x00, 0x00};
   if (memcmp(nan_dest, &payload[4], 6) == 0) {
-    char nan_mac[6] = {0};
-    if (odid_wifi_receive_message_pack_nan_action_frame(&UAS_data, nan_mac, payload, length) == 0) {
+    if (odid_wifi_receive_message_pack_nan_action_frame(&UAS_data, nullptr, payload, length) == 0) {
       id_data UAV;
       memset(&UAV, 0, sizeof(UAV));
       memcpy(UAV.mac, &payload[10], 6);
@@ -538,6 +541,9 @@ void setup() {
 
   nvs_flash_init();
 
+  // Print queue — must exist before enabling promiscuous RX
+  printQueue = xQueueCreate(MAX_UAVS, sizeof(id_data));
+
   // WiFi promiscuous mode
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
@@ -558,8 +564,7 @@ void setup() {
   pBLEScan->setActiveScan(true);
   Serial.println("BLE scanning initialized (NimBLE)");
 
-  // Print queue
-  printQueue = xQueueCreate(MAX_UAVS, sizeof(id_data));
+  // (printQueue already created before WiFi init above)
 
   // FreeRTOS tasks — C5 is single-core, S3 is dual-core
 #if SINGLE_CORE

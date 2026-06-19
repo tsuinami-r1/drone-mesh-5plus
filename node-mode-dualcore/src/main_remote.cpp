@@ -144,6 +144,7 @@ public:
         ODID_BasicID_data basic;
         decodeBasicIDMessage(&basic, (ODID_BasicID_encoded*)odid);
         strncpy(UAV->uav_id, (char*)basic.UASID, ODID_ID_SIZE);
+        UAV->uav_id[ODID_ID_SIZE] = '\0';
         break;
       }
       case 0x10: {  // Location
@@ -200,8 +201,10 @@ void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
       UAV.rssi = packet->rx_ctrl.rssi;
       UAV.last_seen = millis();
 
-      if (UAS_data.BasicIDValid[0])
+      if (UAS_data.BasicIDValid[0]) {
         strncpy(UAV.uav_id, (char *)UAS_data.BasicID[0].UASID, ODID_ID_SIZE);
+        UAV.uav_id[ODID_ID_SIZE] = '\0';
+      }
       if (UAS_data.LocationValid) {
         UAV.lat_d = UAS_data.Location.Latitude;
         UAV.long_d = UAS_data.Location.Longitude;
@@ -251,8 +254,10 @@ void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
           UAV.rssi = packet->rx_ctrl.rssi;
           UAV.last_seen = millis();
 
-          if (UAS_data.BasicIDValid[0])
+          if (UAS_data.BasicIDValid[0]) {
             strncpy(UAV.uav_id, (char *)UAS_data.BasicID[0].UASID, ODID_ID_SIZE);
+            UAV.uav_id[ODID_ID_SIZE] = '\0';
+          }
           if (UAS_data.LocationValid) {
             UAV.lat_d = UAS_data.Location.Latitude;
             UAV.long_d = UAS_data.Location.Longitude;

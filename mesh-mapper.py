@@ -70,7 +70,7 @@ def cleanup_old_detections():
     """Mark stale detections as inactive instead of removing them to preserve session persistence"""
     current_time = time.time()
     
-    for mac, detection in tracked_pairs.items():
+    for mac, detection in list(tracked_pairs.items()):
         last_update = detection.get('last_update', 0)
         age = current_time - last_update
         if detection.get('type') == 'analog_fm':
@@ -686,10 +686,11 @@ def auto_connect_to_saved_ports():
     
     # Start serial threads for available ports
     for port in SELECTED_PORTS.values():
-        serial_connected_status[port] = False
-        start_serial_thread(port)
-        logger.info(f"Started serial thread for port: {port}")
-    
+        if not serial_connected_status.get(port, False):
+            serial_connected_status[port] = False
+            start_serial_thread(port)
+            logger.info(f"Started serial thread for port: {port}")
+
     # Send watchdog reset to each microcontroller over USB
     time.sleep(2)  # Give threads time to establish connections
     with serial_objs_lock:
@@ -856,9 +857,9 @@ def generate_kml():
                 continue
             lat, lon = det.get('drone_lat'), det.get('drone_long')
             ts = det.get('last_update')
-            if lat and lon:
+            if lat and lon and ts is not None:
                 # break flight on time gap
-                if last_ts and (ts - last_ts) > staleThreshold:
+                if last_ts is not None and (ts - last_ts) > staleThreshold:
                     # flush current flight
                     if len(current_flight) >= 1:
                         # start folder
@@ -1110,7 +1111,10 @@ def update_detection(detection):
         
         # Forward this no-GPS detection to the client
         tracked_pairs[mac] = detection
-        detection_history.append(detection.copy())
+        # analog_fm re-reports every ~5 s per channel; skip history to prevent
+        # saturating the 1000-entry deque and evicting real drone track points.
+        if detection.get("type") != "analog_fm":
+            detection_history.append(detection.copy())
         
         # Backend webhook logic for all detections (GPS and no-GPS) - enabled
         should_trigger, is_new = should_trigger_webhook_earliest(detection, mac)
@@ -1193,7 +1197,8 @@ def update_detection(detection):
     except Exception:
         pass
     _tak_enqueue(detection)
-    detection_history.append(detection.copy())
+    if detection.get("type") != "analog_fm":
+        detection_history.append(detection.copy())
     logger.debug(f"Updated tracked_pairs for {mac}")
     with open(CSV_FILENAME, mode='a', newline='') as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=[
@@ -1944,7 +1949,7 @@ HTML_PAGE = '''
       margin: 0;
       color: #FF00FF;
     }
-# Add margin to filterToggle when collapsed
+/* Add margin to filterToggle when collapsed */
     #filterBox.collapsed #filterHeader #filterToggle {
       margin-left: 5px;
     }
@@ -2623,13 +2628,6 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 });
-// Fallback collapse handler to ensure filter toggle works
-document.getElementById("filterToggle").addEventListener("click", function() {
-  const box = document.getElementById("filterBox");
-  const isCollapsed = box.classList.toggle("collapsed");
-  this.textContent = isCollapsed ? "[+]" : "[-]";
-  localStorage.setItem('filterCollapsed', isCollapsed);
-});
 // Configure tile loading for smooth zoom transitions
 L.Map.prototype.options.fadeAnimation = true;
 L.Map.prototype.options.zoomAnimation = true;
@@ -3014,6 +3012,10 @@ function updateMarkerButtons(markerType, id) {
 
 function openAliasPopup(mac) {
   let detection = window.tracked_pairs[mac] || {};
+  if (detection.type === 'analog_fm') {
+    if (analogFmMarkers[mac]) { analogFmMarkers[mac].openPopup(); }
+    return;
+  }
   let content = generatePopupContent(Object.assign({mac: mac}, detection), 'alias');
   if (droneMarkers[mac]) {
     droneMarkers[mac].setPopupContent(content).openPopup();
@@ -3494,7 +3496,6 @@ function updateComboList(data) {
 // Only zoom on truly new detections—never on the initial restore
 var initialLoad    = true;
 var seenDrones     = {};
-var seenAliased    = {};
 var previousActive = {};
 // Initialize seenDrones and previousActive from persisted trackedPairs to suppress reload popups
 (function() {
@@ -3566,7 +3567,7 @@ async function updateData() {
         // GPS drone popup logic
         if (!wasActive && activeNow) {
           shouldShowPopup = true;
-          popupIsNew = alias ? false : !seenDrones[mac];
+          popupIsNew = alias ? false : isNew;
         }
         // No-GPS drone popup logic (centralized here)
         else if (isNoGpsDrone && !alertedNoGpsDrones.has(mac)) {
@@ -3626,6 +3627,7 @@ async function updateData() {
         }
       }
       // ---- end analog FM ----
+      if (det.type === 'analog_fm') continue;
 
       if (!validDrone && !validPilot) continue;
       const color = get_color_for_mac(mac);
@@ -3729,12 +3731,8 @@ async function updateData() {
         // (auto-zoom disabled except for followLock)
         if (followLock.enabled && followLock.type === 'pilot' && followLock.id === mac) { map.setView([pilotLat, pilotLng], map.getZoom()); }
       }
-      // At end of loop iteration, remember this state for next time
-      previousActive[mac] = validDrone;
     }
-    initialLoad = false;
     updateComboList(data);
-    updateAliases();
     // Mark that the first restore/update is done
     initialLoad = false;
 
@@ -3750,16 +3748,16 @@ async function updateData() {
       if (!hasGps && hasRecentTransmission && det.type !== 'analog_fm' && det.id_type !== 'DJI' && det.basic_id !== 'MAVLink') {
         // Apply no-GPS styling and one-time alert for drones with no GPS but recent transmission
         droneElem.classList.add('no-gps');
-        if (!alertedNoGpsDrones.has(det.mac)) {
+        if (!alertedNoGpsDrones.has(mac)) {
           // Duplicate alert removed - already handled in main loop
           // showTerminalPopup(det, true);
-          alertedNoGpsDrones.add(det.mac);
+          alertedNoGpsDrones.add(mac);
         }
       } else {
         // Remove no-GPS styling and reset alert state when GPS is acquired or transmission stops
         droneElem.classList.remove('no-gps');
         if (!hasRecentTransmission) {
-          alertedNoGpsDrones.delete(det.mac);
+          alertedNoGpsDrones.delete(mac);
         }
       }
     }
@@ -3830,14 +3828,6 @@ function updateLockFollow() {
 }
 setInterval(updateLockFollow, 200);
 
-document.getElementById("filterToggle").addEventListener("click", function() {
-  const box = document.getElementById("filterBox");
-  const isCollapsed = box.classList.toggle("collapsed");
-  this.textContent = isCollapsed ? "[+]" : "[-]";
-  // Sync Node Mode toggle with stored setting when filter opens
-  const mainSwitch = document.getElementById('nodeModeMainSwitch');
-  mainSwitch.checked = (localStorage.getItem('nodeMode') === 'true');
-});
 
 async function restorePaths() {
   try {
@@ -3863,7 +3853,6 @@ async function restorePaths() {
     }
   } catch (error) { console.error("Error restoring paths:", error); }
 }
-setInterval(restorePaths, 200);
 restorePaths();
 
 function updateColor(mac, hue) {
@@ -3914,13 +3903,6 @@ function updateColor(mac, hue) {
 </script>
 </body>
 </html>
-<script>
-  if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('/sw.js')
-      .then(reg => console.log('Service Worker registered', reg))
-      .catch(err => console.error('Service Worker registration failed', err));
-  }
-</script>
 '''
 # ----------------------
 # New route: USB port selection for multiple ports.
@@ -4217,9 +4199,10 @@ def serial_reader(port):
     max_connection_attempts = 5
     data_received_count = 0
     last_data_time = time.time()
-    
+    first_connect = True
+
     logger.info(f"Starting serial reader thread for port: {port}")
-    
+
     while not SHUTDOWN_EVENT.is_set():
         # Try to open or re-open the serial port
         if ser is None or not getattr(ser, 'is_open', False):
@@ -4230,14 +4213,14 @@ def serial_reader(port):
                 logger.info(f"Opened serial port {port} at {BAUD_RATE} baud.")
                 with serial_objs_lock:
                     serial_objs[port] = ser
-                    
+
                 # Broadcast the updated status immediately
                 emit_serial_status()
-                    
+
                 # Send a test command to wake up the device (reduce frequency to prevent disconnects)
                 try:
-                    # Only send watchdog reset once, not continuously
-                    if connection_attempts == 0:  # Only on first successful connection
+                    if first_connect:  # Only on first successful connection
+                        first_connect = False
                         time.sleep(0.5)  # Small delay before sending command
                         ser.write(b'WATCHDOG_RESET\n')
                         logger.debug(f"Sent initial watchdog reset to {port}")
@@ -4276,7 +4259,9 @@ def serial_reader(port):
                 # JSON extraction and detection handling...
                 json_str = line
                 if '{' in line:
-                    json_str = line[line.find('{'):]
+                    start = line.find('{')
+                    end   = line.rfind('}')
+                    json_str = line[start:end + 1] if end > start else line[start:]
                     
                 try:
                     detection = json.loads(json_str)
@@ -4706,49 +4691,6 @@ def handle_connect():
     emit_paths()
     emit_cumulative_log()
 
-# Helper functions to emit all real-time data
-
-def emit_serial_status():
-    try:
-        socketio.emit('serial_status', serial_connected_status, )
-    except Exception as e:
-        logger.debug(f"Error emitting serial status: {e}")
-        pass  # Ignore if no clients connected or serialization error
-
-def emit_aliases():
-    try:
-        socketio.emit('aliases', ALIASES, )
-    except Exception as e:
-        logger.debug(f"Error emitting aliases: {e}")
-
-def emit_detections():
-    try:
-        # Convert tracked_pairs to a JSON-serializable format
-        serializable_pairs = {}
-        for key, value in tracked_pairs.items():
-            # Ensure key is a string
-            str_key = str(key)
-            # Ensure value is JSON-serializable
-            if isinstance(value, dict):
-                serializable_pairs[str_key] = value
-            else:
-                serializable_pairs[str_key] = str(value)
-        socketio.emit('detections', serializable_pairs, )
-    except Exception as e:
-        logger.debug(f"Error emitting detections: {e}")
-
-def emit_paths():
-    try:
-        socketio.emit('paths', get_paths_for_emit(), )
-    except Exception as e:
-        logger.debug(f"Error emitting paths: {e}")
-
-def emit_cumulative_log():
-    try:
-        socketio.emit('cumulative_log', get_cumulative_log_for_emit(), )
-    except Exception as e:
-        logger.debug(f"Error emitting cumulative log: {e}")
-
 # Helper to get paths for emit
 
 def get_paths_for_emit():
@@ -4888,7 +4830,8 @@ def api_meshtastic_url():
        POST: set Meshtastic HTTP API URL for a node and eagerly fetch its position.
              Body: {node_id, url}"""
     if request.method == 'GET':
-        return jsonify(dict(MESHTASTIC_URLS))
+        with NODE_LOCATIONS_LOCK:
+            return jsonify(dict(MESHTASTIC_URLS))
     data = request.get_json(force=True) or {}
     node_id = str(data.get('node_id', '')).strip()
     url     = str(data.get('url', '')).strip().rstrip('/')
@@ -4909,91 +4852,6 @@ def api_tak_contacts():
     """Return current inbound TAK contacts (ATAK/WinTAK operator positions)."""
     with TAK_CONTACTS_LOCK:
         return jsonify(dict(tak_contacts))
-
-# --- Webhook URL Persistence ---
-WEBHOOK_URL_FILE = os.path.join(BASE_DIR, "webhook_url.json")
-
-def save_webhook_url():
-    """Save the current webhook URL to disk"""
-    global WEBHOOK_URL
-    try:
-        with open(WEBHOOK_URL_FILE, "w") as f:
-            json.dump({"webhook_url": WEBHOOK_URL}, f)
-        logger.debug(f"Webhook URL saved to {WEBHOOK_URL_FILE}")
-    except Exception as e:
-        logger.error(f"Error saving webhook URL: {e}")
-
-def load_webhook_url():
-    """Load the webhook URL from disk on startup"""
-    global WEBHOOK_URL
-    if os.path.exists(WEBHOOK_URL_FILE):
-        try:
-            with open(WEBHOOK_URL_FILE, "r") as f:
-                data = json.load(f)
-                WEBHOOK_URL = data.get("webhook_url", None)
-                if WEBHOOK_URL:
-                    logger.info(f"Loaded saved webhook URL: {WEBHOOK_URL}")
-                else:
-                    logger.info("No webhook URL found in saved file")
-        except Exception as e:
-            logger.error(f"Error loading webhook URL: {e}")
-            WEBHOOK_URL = None
-    else:
-        logger.info("No saved webhook URL file found")
-        WEBHOOK_URL = None
-
-def auto_connect_to_saved_ports():
-    """
-    Check if any previously saved ports are available and auto-connect to them.
-    Returns True if at least one port was connected, False otherwise.
-    """
-    global SELECTED_PORTS
-    
-    if not SELECTED_PORTS:
-        logger.info("No saved ports found for auto-connection")
-        return False
-    
-    # Get currently available ports
-    available_ports = {p.device for p in serial.tools.list_ports.comports()}
-    logger.debug(f"Available ports: {available_ports}")
-    
-    # Check which saved ports are still available
-    available_saved_ports = {}
-    for port_key, port_device in SELECTED_PORTS.items():
-        if port_device in available_ports:
-            available_saved_ports[port_key] = port_device
-    
-    if not available_saved_ports:
-        logger.warning("No previously used ports are currently available")
-        return False
-    
-    logger.info(f"Auto-connecting to previously used ports: {list(available_saved_ports.values())}")
-    
-    # Update SELECTED_PORTS to only include available ports
-    SELECTED_PORTS = available_saved_ports
-    
-    # Start serial threads for available ports
-    for port in SELECTED_PORTS.values():
-        serial_connected_status[port] = False
-        start_serial_thread(port)
-        logger.info(f"Started serial thread for port: {port}")
-    
-    # Send watchdog reset to each microcontroller over USB
-    time.sleep(2)  # Give threads time to establish connections
-    with serial_objs_lock:
-        for port, ser in serial_objs.items():
-            try:
-                if ser and ser.is_open:
-                    ser.write(b'WATCHDOG_RESET\n')
-                    logger.debug(f"Sent watchdog reset to {port}")
-            except Exception as e:
-                logger.error(f"Failed to send watchdog reset to {port}: {e}")
-    
-    return True
-
-# ----------------------
-# Webhook Functions (moved here to be available before update_detection)
-# ----------------------
 
 if __name__ == '__main__':
     main()
