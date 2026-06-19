@@ -541,6 +541,9 @@ void setup() {
   pBLEScan = NimBLEDevice::getScan();
   pBLEScan->setScanCallbacks(new MyAdvertisedDeviceCallbacks());
   pBLEScan->setActiveScan(true);
+#if CONFIG_BT_NIMBLE_EXT_ADV
+  pBLEScan->setPhy(NimBLEScan::SCAN_ALL);  // 1M PHY + Coded PHY (BLE 5.0 long range)
+#endif
   Serial.println("BLE scanning initialized (NimBLE)");
 
   // (printQueue already created before WiFi init above)
