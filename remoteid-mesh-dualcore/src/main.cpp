@@ -87,6 +87,7 @@ public:
         ODID_BasicID_data basic;
         decodeBasicIDMessage(&basic, (ODID_BasicID_encoded *)odid);
         strncpy(UAV->uav_id, (char *)basic.UASID, ODID_ID_SIZE);
+        UAV->uav_id[ODID_ID_SIZE] = '\0';
         break;
       }
       case 0x10: {
@@ -127,7 +128,7 @@ void send_json_fast(const id_data *UAV) {
   snprintf(mac_str, sizeof(mac_str), "%02x:%02x:%02x:%02x:%02x:%02x",
            UAV->mac[0], UAV->mac[1], UAV->mac[2],
            UAV->mac[3], UAV->mac[4], UAV->mac[5]);
-  char json_msg[256];
+  char json_msg[320];
   snprintf(json_msg, sizeof(json_msg),
     "{\"mac\":\"%s\",\"rssi\":%d,\"drone_lat\":%.6f,\"drone_long\":%.6f,\"drone_altitude\":%d,\"pilot_lat\":%.6f,\"pilot_long\":%.6f,\"basic_id\":\"%s\"}",
     mac_str, UAV->rssi, UAV->lat_d, UAV->long_d, UAV->altitude_msl,
@@ -155,7 +156,7 @@ void print_compact_message(const id_data *UAV) {
   if (msg_len < MAX_MESH_SIZE && UAV->lat_d != 0.0 && UAV->long_d != 0.0) {
     msg_len += snprintf(mesh_msg + msg_len, sizeof(mesh_msg) - msg_len,
                         " https://maps.google.com/?q=%.6f,%.6f",
-                        UAV->lat_d, UAV->long_d, UAV->uav_id);
+                        UAV->lat_d, UAV->long_d);
   }
   if (Serial1.availableForWrite() >= msg_len) {
     Serial1.println(mesh_msg);
@@ -180,6 +181,17 @@ void bleScanTask(void *parameter) {
   }
 }
 
+static const uint8_t channels_2_4ghz[] = {1, 6, 11};
+
+void channelHopTask(void *parameter) {
+  uint8_t idx = 0;
+  for (;;) {
+    esp_wifi_set_channel(channels_2_4ghz[idx], WIFI_SECOND_CHAN_NONE);
+    idx = (idx + 1) % (sizeof(channels_2_4ghz) / sizeof(channels_2_4ghz[0]));
+    vTaskDelay(pdMS_TO_TICKS(200));
+  }
+}
+
 static void storeAndQueue(id_data *UAV) {
   id_data *storedUAV = next_uav(UAV->mac);
   *storedUAV = *UAV;
@@ -190,11 +202,13 @@ static void storeAndQueue(id_data *UAV) {
 
 void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
   if (type != WIFI_PKT_MGMT && type != WIFI_PKT_DATA) return;
-  
+
   wifi_promiscuous_pkt_t *packet = (wifi_promiscuous_pkt_t *)buffer;
   uint8_t *payload = packet->payload;
   int length = packet->rx_ctrl.sig_len;
-  
+
+  if (length < 16) return;   /* too short to safely read addr/NAN fields */
+
   if (type == WIFI_PKT_DATA) {
     uint8_t mav_mac[6];
     mav_gps_t mav_gps;
@@ -225,6 +239,7 @@ void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
       
       if (UAS_data.BasicIDValid[0]) {
         strncpy(UAV.uav_id, (char *)UAS_data.BasicID[0].UASID, ODID_ID_SIZE);
+        UAV.uav_id[ODID_ID_SIZE] = '\0';
       }
       if (UAS_data.LocationValid) {
         UAV.lat_d = UAS_data.Location.Latitude;
@@ -295,6 +310,7 @@ void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
 
             if (UAS_data.BasicIDValid[0]) {
               strncpy(UAV.uav_id, (char *)UAS_data.BasicID[0].UASID, ODID_ID_SIZE);
+              UAV.uav_id[ODID_ID_SIZE] = '\0';
             }
             if (UAS_data.LocationValid) {
               UAV.lat_d = UAS_data.Location.Latitude;
@@ -357,8 +373,9 @@ void setup() {
   esp_wifi_set_promiscuous_rx_cb(&callback);
   esp_wifi_set_channel(6, WIFI_SECOND_CHAN_NONE);
 
-  xTaskCreatePinnedToCore(bleScanTask, "BLEScanTask", 10000, NULL, 1, NULL, 1);
-  xTaskCreatePinnedToCore(printerTask, "PrinterTask", 10000, NULL, 1, NULL, 1);
+  xTaskCreatePinnedToCore(bleScanTask,    "BLEScanTask",    10000, NULL, 1, NULL, 1);
+  xTaskCreatePinnedToCore(printerTask,    "PrinterTask",    10000, NULL, 1, NULL, 1);
+  xTaskCreatePinnedToCore(channelHopTask, "ChannelHopTask", 2048,  NULL, 2, NULL, 0);
 
   memset(uavs, 0, sizeof(uavs));
 }
@@ -366,7 +383,7 @@ void setup() {
 void loop() {
   unsigned long current_millis = millis();
     if ((current_millis - last_status) > 60000UL) {
-      Serial.println("{\"   [+] Device is active and scanning...\"}");
+      Serial.println("{\"heartbeat\":\"Device is active and scanning.\"}");
       last_status = current_millis;
     }
 }

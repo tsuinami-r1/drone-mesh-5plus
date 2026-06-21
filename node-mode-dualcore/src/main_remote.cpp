@@ -144,6 +144,7 @@ public:
         ODID_BasicID_data basic;
         decodeBasicIDMessage(&basic, (ODID_BasicID_encoded*)odid);
         strncpy(UAV->uav_id, (char*)basic.UASID, ODID_ID_SIZE);
+        UAV->uav_id[ODID_ID_SIZE] = '\0';
         break;
       }
       case 0x10: {  // Location
@@ -200,8 +201,10 @@ void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
       UAV.rssi = packet->rx_ctrl.rssi;
       UAV.last_seen = millis();
 
-      if (UAS_data.BasicIDValid[0])
+      if (UAS_data.BasicIDValid[0]) {
         strncpy(UAV.uav_id, (char *)UAS_data.BasicID[0].UASID, ODID_ID_SIZE);
+        UAV.uav_id[ODID_ID_SIZE] = '\0';
+      }
       if (UAS_data.LocationValid) {
         UAV.lat_d = UAS_data.Location.Latitude;
         UAV.long_d = UAS_data.Location.Longitude;
@@ -251,8 +254,10 @@ void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
           UAV.rssi = packet->rx_ctrl.rssi;
           UAV.last_seen = millis();
 
-          if (UAS_data.BasicIDValid[0])
+          if (UAS_data.BasicIDValid[0]) {
             strncpy(UAV.uav_id, (char *)UAS_data.BasicID[0].UASID, ODID_ID_SIZE);
+            UAV.uav_id[ODID_ID_SIZE] = '\0';
+          }
           if (UAS_data.LocationValid) {
             UAV.lat_d = UAS_data.Location.Latitude;
             UAV.long_d = UAS_data.Location.Longitude;
@@ -356,6 +361,17 @@ static void wifiProcessTask(void *param) {
   }
 }
 
+static const uint8_t channels_2_4ghz[] = {1, 6, 11};
+
+static void channelHopTask(void *param) {
+  uint8_t idx = 0;
+  for (;;) {
+    esp_wifi_set_channel(channels_2_4ghz[idx], WIFI_SECOND_CHAN_NONE);
+    idx = (idx + 1) % (sizeof(channels_2_4ghz) / sizeof(channels_2_4ghz[0]));
+    vTaskDelay(pdMS_TO_TICKS(200));
+  }
+}
+
 // UART forward task: anything the Heltec sends back gets echoed to USB
 // (mesh acknowledgments, Meshtastic debug output, etc.)
 static void uartForwardTask(void *param) {
@@ -435,6 +451,7 @@ void setup() {
   xTaskCreatePinnedToCore(wifiProcessTask, "WiFi",    10000, NULL, 1, NULL, 0);
   xTaskCreatePinnedToCore(printerTask,     "Print",   10000, NULL, 1, NULL, 1);
   xTaskCreatePinnedToCore(uartForwardTask, "UART_FW",  4096, NULL, 1, NULL, 1);
+  xTaskCreatePinnedToCore(channelHopTask,  "ChHop",   2048,  NULL, 2, NULL, 0);
 
   Serial.println("[REMOTE] All tasks launched - scanning for drones...\n");
 }

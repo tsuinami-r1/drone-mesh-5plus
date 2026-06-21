@@ -25,7 +25,7 @@
   #define RX5808_DATA_PIN  10  // D10
   #define RX5808_CLK_PIN    8  // D8
   #define RX5808_CS_PIN     9  // D9
-  #define RX5808_RSSI_PIN   2  // D0 / ADC1_CH1
+  #define RX5808_RSSI_PIN   2  // D0 / ADC1_CH2
 #else
   // XIAO ESP32-S3 (default): D10=GPIO9, D8=GPIO7, D9=GPIO8, D0=GPIO1
   #define RX5808_DATA_PIN   9  // D10
@@ -37,8 +37,9 @@
 // ---- Tuning parameters ----
 
 // ADC count (0–4095, 12-bit) above which a signal is reported.
-// Set this ~200 counts above your observed idle noise floor.
-#define RSSI_THRESHOLD   1800
+// RX5808 RSSI output swings 0–1 V; with ADC_11db (0–3.1 V range) that is
+// ~0–1320 counts. Set threshold ~200 counts above your idle noise floor.
+#define RSSI_THRESHOLD    600
 
 // ADC reads averaged per RSSI measurement
 #define RSSI_SAMPLES     10

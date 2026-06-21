@@ -121,6 +121,7 @@ public:
         ODID_BasicID_data basic;
         decodeBasicIDMessage(&basic, (ODID_BasicID_encoded *)odid);
         strncpy(UAV->uav_id, (char *)basic.UASID, ODID_ID_SIZE);
+        UAV->uav_id[ODID_ID_SIZE] = '\0';
         break;
       }
       case 0x10: {
@@ -162,6 +163,17 @@ void bleScanTask(void *parameter) {
   }
 }
 
+static const uint8_t channels_2_4ghz[] = {1, 6, 11};
+
+void channelHopTask(void *parameter) {
+  uint8_t idx = 0;
+  for (;;) {
+    esp_wifi_set_channel(channels_2_4ghz[idx], WIFI_SECOND_CHAN_NONE);
+    idx = (idx + 1) % (sizeof(channels_2_4ghz) / sizeof(channels_2_4ghz[0]));
+    vTaskDelay(pdMS_TO_TICKS(200));
+  }
+}
+
 // Initialize USB Serial (for JSON output) and Serial1 (
 void initializeSerial() {
   // Initialize USB Serial for JSON payloads.
@@ -195,7 +207,8 @@ void setup() {
   pBLEScan->setActiveScan(true);
   pBLEScan->setInterval(100);
   pBLEScan->setWindow(99);
-  xTaskCreatePinnedToCore(bleScanTask, "BLEScanTask", 10000, NULL, 1, NULL, 1);
+  xTaskCreatePinnedToCore(bleScanTask,    "BLEScanTask",    10000, NULL, 1, NULL, 1);
+  xTaskCreatePinnedToCore(channelHopTask, "ChannelHopTask", 2048,  NULL, 2, NULL, 0);
 }
 
 void loop() {
@@ -212,7 +225,7 @@ void send_json_fast(struct uav_data *UAV) {
   snprintf(mac_str, sizeof(mac_str), "%02x:%02x:%02x:%02x:%02x:%02x",
            UAV->mac[0], UAV->mac[1], UAV->mac[2],
            UAV->mac[3], UAV->mac[4], UAV->mac[5]);
-  char json_msg[256];
+  char json_msg[320];
   snprintf(json_msg, sizeof(json_msg),
     "{\"mac\":\"%s\", \"rssi\":%d, \"drone_lat\":%.6f, \"drone_long\":%.6f, \"drone_altitude\":%d, \"pilot_lat\":%.6f, \"pilot_long\":%.6f, \"basic_id\":\"%s\"}",
     mac_str, UAV->rssi, UAV->lat_d, UAV->long_d, UAV->altitude_msl, UAV->base_lat_d, UAV->base_long_d, UAV->uav_id);
@@ -265,6 +278,8 @@ void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
   uint8_t *payload = packet->payload;
   int length = packet->rx_ctrl.sig_len;
   
+  if (length < 16) return;   /* too short to safely read addr/NAN fields */
+
   if (type == WIFI_PKT_DATA) {
     uint8_t mav_mac[6];
     mav_gps_t mav_gps;
@@ -360,6 +375,7 @@ void parse_odid(uav_data *UAV, ODID_UAS_Data *UAS_data2) {
   
   if (UAS_data2->BasicIDValid[0]) {
     strncpy(UAV->uav_id, (char *)UAS_data2->BasicID[0].UASID, ODID_ID_SIZE);
+    UAV->uav_id[ODID_ID_SIZE] = '\0';
   }
   if (UAS_data2->LocationValid) {
     UAV->lat_d = UAS_data2->Location.Latitude;
