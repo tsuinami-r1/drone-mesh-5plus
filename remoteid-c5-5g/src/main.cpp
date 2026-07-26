@@ -236,6 +236,8 @@ void send_json_fast(const id_data *UAV) {
   snprintf(mac_str, sizeof(mac_str), "%02x:%02x:%02x:%02x:%02x:%02x",
            UAV->mac[0], UAV->mac[1], UAV->mac[2],
            UAV->mac[3], UAV->mac[4], UAV->mac[5]);
+  char id_esc[48];  /* uav_id is raw over-the-air bytes — escape for JSON safety */
+  dji_escape_str(UAV->uav_id, id_esc, sizeof(id_esc));
   char json_msg[320];
   snprintf(json_msg, sizeof(json_msg),
     "{\"mac\":\"%s\",\"rssi\":%d,\"band\":\"%s\",\"channel\":%d,"
@@ -243,7 +245,7 @@ void send_json_fast(const id_data *UAV) {
     "\"pilot_lat\":%.6f,\"pilot_long\":%.6f,\"basic_id\":\"%s\"}",
     mac_str, UAV->rssi, bandToString(UAV->band), UAV->channel,
     UAV->lat_d, UAV->long_d, UAV->altitude_msl,
-    UAV->base_lat_d, UAV->base_long_d, UAV->uav_id);
+    UAV->base_lat_d, UAV->base_long_d, id_esc);
   Serial.println(json_msg);
 }
 
