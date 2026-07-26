@@ -120,7 +120,10 @@ public:
 
     const uint8_t *msgs;
     int msgs_len;
-    if (!bt_odid_find_odid(adv, adv_len, &msgs, &msgs_len) || msgs_len < 1) return;
+    if (!bt_odid_find_odid(adv, adv_len, &msgs, &msgs_len)) return;
+    // Decoders read a full 25-byte ODID message; require that many bytes so a
+    // truncated advertisement cannot cause an out-of-bounds read.
+    if (msgs_len < ODID_MESSAGE_SIZE) return;
 
     uav_data uav_buf = {};
     uav_data *UAV = &uav_buf;
@@ -363,9 +366,12 @@ void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
         else if (((payload[offset+2] == 0x90 && payload[offset+3] == 0x3a && payload[offset+4] == 0xe6)) ||
                  ((payload[offset+2] == 0xfa && payload[offset+3] == 0x0b && payload[offset+4] == 0xbc))) {
           int j = offset + 7;
-          if (j < length) {
+          /* Bound the ODID pack to this IE's body (len - 5), not the rest of the
+             frame, so a truncated IE cannot consume following IEs. */
+          if (len >= 6 && j < length) {
+            int pack_len = len - 5;
             memset(&UAS_data, 0, sizeof(UAS_data));
-            odid_message_process_pack(&UAS_data, &payload[j], length - j);
+            odid_message_process_pack(&UAS_data, &payload[j], pack_len);
             parse_odid(&UAV, &UAS_data);
             print_compact_message(&UAV);
             send_json_fast(&UAV);

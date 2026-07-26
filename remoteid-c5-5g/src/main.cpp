@@ -31,6 +31,7 @@
 #include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <freertos/semphr.h>
 
 // ============================================================================
 // UART Pins — same wiring as remoteid-mesh-dualcore (Heltec LoRa V3)
@@ -127,29 +128,62 @@ static portMUX_TYPE channelMux = portMUX_INITIALIZER_UNLOCKED;
 
 static QueueHandle_t printQueue;
 
+// uavs[] is written from the WiFi promiscuous callback and the NimBLE scan
+// callback; Serial/Serial1 are written from printerTask, the DJI branch, and
+// loop(). Guard each with a mutex. The two are never held nested (the uav lock
+// is released before any serial write), so there is no deadlock.
+static SemaphoreHandle_t g_uav_mux    = nullptr;
+static SemaphoreHandle_t g_serial_mux = nullptr;
+
+static inline void serial_println_locked(const char *s) {
+  if (g_serial_mux == nullptr) { Serial.println(s); return; }
+  if (xSemaphoreTake(g_serial_mux, pdMS_TO_TICKS(100)) == pdTRUE) {
+    Serial.println(s);
+    xSemaphoreGive(g_serial_mux);
+  }
+}
+
+static inline void serial1_println_locked(const char *s, int min_free) {
+  if (g_serial_mux == nullptr) {
+    if (Serial1.availableForWrite() >= min_free) Serial1.println(s);
+    return;
+  }
+  if (xSemaphoreTake(g_serial_mux, pdMS_TO_TICKS(100)) == pdTRUE) {
+    if (Serial1.availableForWrite() >= min_free) Serial1.println(s);
+    xSemaphoreGive(g_serial_mux);
+  }
+}
+
 // ============================================================================
 // UAV Tracking
 // ============================================================================
 
+// MUST be called with g_uav_mux held. Occupancy is tracked by last_seen != 0 so
+// drones with a 0x00-leading MAC are not mistaken for empty slots; a slot is
+// cleared when reassigned so a previous occupant cannot bleed into the new one.
 id_data* next_uav(const uint8_t* mac) {
   for (int i = 0; i < MAX_UAVS; i++) {
-    if (memcmp(uavs[i].mac, mac, 6) == 0)
+    if (uavs[i].last_seen != 0 && memcmp(uavs[i].mac, mac, 6) == 0)
       return &uavs[i];
   }
+  int idx = -1;
   for (int i = 0; i < MAX_UAVS; i++) {
-    if (uavs[i].mac[0] == 0)
-      return &uavs[i];
+    if (uavs[i].last_seen == 0) { idx = i; break; }
   }
-  // Evict oldest entry
-  uint32_t oldest_time = UINT32_MAX;
-  int oldest_idx = 0;
-  for (int i = 0; i < MAX_UAVS; i++) {
-    if (uavs[i].last_seen < oldest_time) {
-      oldest_time = uavs[i].last_seen;
-      oldest_idx = i;
+  if (idx < 0) {
+    uint32_t oldest_time = UINT32_MAX;
+    idx = 0;
+    for (int i = 0; i < MAX_UAVS; i++) {
+      if (uavs[i].last_seen < oldest_time) {
+        oldest_time = uavs[i].last_seen;
+        idx = i;
+      }
     }
   }
-  return &uavs[oldest_idx];
+  memset(&uavs[idx], 0, sizeof(uavs[idx]));
+  memcpy(uavs[idx].mac, mac, 6);
+  uavs[idx].last_seen = millis();
+  return &uavs[idx];
 }
 
 // ============================================================================
@@ -166,17 +200,23 @@ public:
 
     const uint8_t *msgs;
     int msgs_len;
-    if (!bt_odid_find_odid(adv, adv_len, &msgs, &msgs_len) || msgs_len < 1) return;
+    if (!bt_odid_find_odid(adv, adv_len, &msgs, &msgs_len)) return;
+    // Decoders read a full 25-byte ODID message; require that many bytes so a
+    // truncated advertisement cannot cause an out-of-bounds read.
+    if (msgs_len < ODID_MESSAGE_SIZE) return;
 
     const uint8_t *mac = device->getAddress().getBase()->val;
+    int rssi = device->getRSSI();
+    const uint8_t *odid = msgs;
+
+    xSemaphoreTake(g_uav_mux, portMAX_DELAY);
     id_data *UAV = next_uav(mac);
     UAV->last_seen = millis();
-    UAV->rssi = device->getRSSI();
+    UAV->rssi = rssi;
     memcpy(UAV->mac, mac, 6);
     UAV->band = BAND_BLE;
     UAV->channel = 0;
 
-    const uint8_t *odid = msgs;
     switch (odid[0] & 0xF0) {
       case 0x00: {
         ODID_BasicID_data basic;
@@ -209,12 +249,46 @@ public:
         strncpy(UAV->op_id, (char *)op.OperatorId, ODID_ID_SIZE);
         break;
       }
+      case 0xF0: {
+        // Message Pack — how BT5 Long Range / extended advertising (Coded PHY,
+        // enabled on this build) carries Remote ID: several messages in one
+        // advertisement. Decode into a LOCAL struct (never the shared UAS_data,
+        // which the WiFi task owns) after bounding the pack to the bytes present.
+        int pack_msgs = (msgs_len >= 3) ? odid[2] : 0;  // MsgPackSize
+        if (pack_msgs >= 1 && pack_msgs <= ODID_PACK_MAX_MESSAGES &&
+            msgs_len >= 3 + pack_msgs * ODID_MESSAGE_SIZE) {
+          ODID_UAS_Data pack;
+          memset(&pack, 0, sizeof(pack));
+          if (decodeMessagePack(&pack, (ODID_MessagePack_encoded *)odid) == 0) {
+            if (pack.BasicIDValid[0]) {
+              strncpy(UAV->uav_id, (char *)pack.BasicID[0].UASID, ODID_ID_SIZE);
+              UAV->uav_id[ODID_ID_SIZE] = '\0';
+            }
+            if (pack.LocationValid) {
+              UAV->lat_d = pack.Location.Latitude;
+              UAV->long_d = pack.Location.Longitude;
+              UAV->altitude_msl = (int)pack.Location.AltitudeGeo;
+              UAV->height_agl = (int)pack.Location.Height;
+              UAV->speed = (int)pack.Location.SpeedHorizontal;
+              UAV->heading = (int)pack.Location.Direction;
+            }
+            if (pack.SystemValid) {
+              UAV->base_lat_d = pack.System.OperatorLatitude;
+              UAV->base_long_d = pack.System.OperatorLongitude;
+            }
+            if (pack.OperatorIDValid) {
+              strncpy(UAV->op_id, (char *)pack.OperatorID.OperatorId, ODID_ID_SIZE);
+              UAV->op_id[ODID_ID_SIZE] = '\0';
+            }
+          }
+        }
+        break;
+      }
     }
     UAV->flag = 1;
-    {
-      id_data tmp = *UAV;
-      xQueueSend(printQueue, &tmp, 0);
-    }
+    id_data tmp = *UAV;
+    xSemaphoreGive(g_uav_mux);
+    xQueueSend(printQueue, &tmp, 0);
   }
 };
 
@@ -246,7 +320,7 @@ void send_json_fast(const id_data *UAV) {
     mac_str, UAV->rssi, bandToString(UAV->band), UAV->channel,
     UAV->lat_d, UAV->long_d, UAV->altitude_msl,
     UAV->base_lat_d, UAV->base_long_d, id_esc);
-  Serial.println(json_msg);
+  serial_println_locked(json_msg);
 }
 
 // ============================================================================
@@ -276,18 +350,14 @@ void print_compact_message(const id_data *UAV) {
                         " https://maps.google.com/?q=%.6f,%.6f",
                         UAV->lat_d, UAV->long_d);
   }
-  if (Serial1.availableForWrite() >= msg_len) {
-    Serial1.println(mesh_msg);
-  }
+  serial1_println_locked(mesh_msg, msg_len);
 
   if (UAV->base_lat_d != 0.0 && UAV->base_long_d != 0.0) {
     char pilot_msg[MAX_MESH_SIZE];
     int pilot_len = snprintf(pilot_msg, sizeof(pilot_msg),
                              "Pilot: https://maps.google.com/?q=%.6f,%.6f",
                              UAV->base_lat_d, UAV->base_long_d);
-    if (Serial1.availableForWrite() >= pilot_len) {
-      Serial1.println(pilot_msg);
-    }
+    serial1_println_locked(pilot_msg, pilot_len);
   }
 }
 
@@ -357,13 +427,13 @@ static void processODIDData(id_data* UAV) {
 }
 
 static void storeAndQueue(id_data* UAV) {
+  xSemaphoreTake(g_uav_mux, portMAX_DELAY);
   id_data* storedUAV = next_uav(UAV->mac);
   *storedUAV = *UAV;
   storedUAV->flag = 1;
-  {
-    id_data tmp = *storedUAV;
-    xQueueSend(printQueue, &tmp, 0);
-  }
+  id_data tmp = *storedUAV;
+  xSemaphoreGive(g_uav_mux);
+  xQueueSend(printQueue, &tmp, 0);
 }
 
 void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
@@ -438,7 +508,7 @@ void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
           if (dji_parse_droneid(&payload[offset + 5], len - 3, &dji)) {
             char djijson[384];
             dji_emit_json(src_mac, packet->rx_ctrl.rssi, &dji, djijson, sizeof(djijson));
-            Serial.println(djijson);
+            serial_println_locked(djijson);
             /* Full JSON (~300 B) exceeds Meshtastic MTU (~228 B); send compact relay instead */
             static unsigned long dji_last_mesh = 0;
             if (millis() - dji_last_mesh >= 5000) {
@@ -451,8 +521,7 @@ void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
               if (dji.lat != 0.0 && dji.lon != 0.0 && n < (int)sizeof(mesh_buf) - 2)
                 n += snprintf(mesh_buf + n, sizeof(mesh_buf) - n,
                               " https://maps.google.com/?q=%.6f,%.6f", dji.lat, dji.lon);
-              if (Serial1.availableForWrite() >= n + 2)
-                Serial1.println(mesh_buf);
+              serial1_println_locked(mesh_buf, n + 2);
               dji_last_mesh = millis();
             }
           }
@@ -461,9 +530,13 @@ void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
         else if (((payload[offset+2] == 0x90 && payload[offset+3] == 0x3a && payload[offset+4] == 0xe6)) ||
                  ((payload[offset+2] == 0xfa && payload[offset+3] == 0x0b && payload[offset+4] == 0xbc))) {
           int j = offset + 7;
-          if (j < length) {
+          /* Bound the ODID pack to this IE's body (len - 5 bytes after the OUI +
+             vendor-type header), not the rest of the frame, so a truncated IE
+             cannot make the decoder consume following IEs as ODID messages. */
+          if (len >= 6 && j < length) {
+            int pack_len = len - 5;
             memset(&UAS_data, 0, sizeof(UAS_data));
-            odid_message_process_pack(&UAS_data, &payload[j], length - j);
+            odid_message_process_pack(&UAS_data, &payload[j], pack_len);
 
             id_data UAV;
             memset(&UAV, 0, sizeof(UAV));
@@ -525,6 +598,10 @@ void setup() {
 
   nvs_flash_init();
 
+  // Mutexes must exist before promiscuous RX / BLE / tasks touch shared state.
+  g_uav_mux    = xSemaphoreCreateMutex();
+  g_serial_mux = xSemaphoreCreateMutex();
+
   // Print queue — must exist before enabling promiscuous RX
   printQueue = xQueueCreate(MAX_UAVS, sizeof(id_data));
 
@@ -579,9 +656,9 @@ void loop() {
 
   if ((current_millis - last_status) > 60000UL) {
 #if DUAL_BAND_ENABLED
-    Serial.println("{\"status\":\"active\",\"mode\":\"dual-band\",\"bands\":[\"2.4GHz\",\"5GHz\",\"BLE\"]}");
+    serial_println_locked("{\"status\":\"active\",\"mode\":\"dual-band\",\"bands\":[\"2.4GHz\",\"5GHz\",\"BLE\"]}");
 #else
-    Serial.println("{\"status\":\"active\",\"mode\":\"single-band\",\"bands\":[\"2.4GHz\",\"BLE\"]}");
+    serial_println_locked("{\"status\":\"active\",\"mode\":\"single-band\",\"bands\":[\"2.4GHz\",\"BLE\"]}");
 #endif
     last_status = current_millis;
   }
