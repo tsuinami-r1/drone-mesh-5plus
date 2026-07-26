@@ -405,7 +405,10 @@ void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
   // NAN Action Frame (WiFi Aware RemoteID)
   static const uint8_t nan_dest[6] = {0x51, 0x6f, 0x9a, 0x01, 0x00, 0x00};
   if (memcmp(nan_dest, &payload[4], 6) == 0) {
-    if (odid_wifi_receive_message_pack_nan_action_frame(&UAS_data, nullptr, payload, length) == 0) {
+    /* Parser unconditionally writes the 6-byte source MAC to this arg; must be a
+       real buffer, not nullptr (UAV.mac is re-derived from &payload[10] below). */
+    uint8_t nan_src[6];
+    if (odid_wifi_receive_message_pack_nan_action_frame(&UAS_data, (char *)nan_src, payload, length) == 0) {
       id_data UAV;
       memset(&UAV, 0, sizeof(UAV));
       memcpy(UAV.mac, &payload[10], 6);
