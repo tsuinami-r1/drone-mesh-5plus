@@ -3477,6 +3477,10 @@ function updateComboList(data) {
       item.className = "drone-item";
       item.addEventListener("dblclick", () => {
          restorePaths();
+         // Resolve the CURRENT detection at click time — this listener is bound
+         // once when the item is created, so the captured `detection` is the
+         // first-seen snapshot; pinning it would use a stale location.
+         const detNow = (window.tracked_pairs && window.tracked_pairs[mac]) || detection;
          if (historicalDrones[mac]) {
              delete historicalDrones[mac];
              localStorage.setItem('historicalDrones', JSON.stringify(historicalDrones));
@@ -3485,13 +3489,13 @@ function updateComboList(data) {
              item.classList.remove("selected");
              map.closePopup();
          } else {
-             historicalDrones[mac] = Object.assign({}, detection, { userLocked: true, lockTime: Date.now()/1000 });
+             historicalDrones[mac] = Object.assign({}, detNow, { userLocked: true, lockTime: Date.now()/1000 });
              localStorage.setItem('historicalDrones', JSON.stringify(historicalDrones));
              showHistoricalDrone(mac, historicalDrones[mac]);
              item.classList.add("selected");
              openAliasPopup(mac);
-             if (detection && detection.drone_lat && detection.drone_long && detection.drone_lat != 0 && detection.drone_long != 0) {
-                 safeSetView([detection.drone_lat, detection.drone_long], 18);
+             if (detNow && detNow.drone_lat && detNow.drone_long && detNow.drone_lat != 0 && detNow.drone_long != 0) {
+                 safeSetView([detNow.drone_lat, detNow.drone_long], 18);
              }
          }
       });
@@ -3575,8 +3579,12 @@ async function updateData() {
         previousActive[mac] = false;
         continue;
       }
-      const droneLat = det.drone_lat, droneLng = det.drone_long;
-      const pilotLat = det.pilot_lat, pilotLng = det.pilot_long;
+      // Coerce missing coords to 0: detections without drone/pilot GPS (e.g.
+      // analog_fm) omit these keys, and `undefined !== 0` would otherwise read
+      // as a valid coordinate — firing the OpenDroneID "drone detected" popup
+      // for an FM video signal and reaching the drone-marker code with NaNs.
+      const droneLat = det.drone_lat || 0, droneLng = det.drone_long || 0;
+      const pilotLat = det.pilot_lat || 0, pilotLng = det.pilot_long || 0;
       const validDrone = (droneLat !== 0 && droneLng !== 0);
       // State-change popup logic
       const alias     = aliases[mac];
@@ -3866,7 +3874,7 @@ async function restorePaths() {
     const data = await response.json();
     for (const mac in data.dronePaths) {
       let isActive = false;
-      if (tracked_pairs[mac] && ((Date.now()/1000) - tracked_pairs[mac].last_update) <= STALE_THRESHOLD) { isActive = true; }
+      if (window.tracked_pairs && window.tracked_pairs[mac] && ((Date.now()/1000) - window.tracked_pairs[mac].last_update) <= STALE_THRESHOLD) { isActive = true; }
       if (!isActive && !historicalDrones[mac]) continue;
       dronePathCoords[mac] = data.dronePaths[mac];
       if (dronePolylines[mac]) { map.removeLayer(dronePolylines[mac]); }
@@ -3875,7 +3883,7 @@ async function restorePaths() {
     }
     for (const mac in data.pilotPaths) {
       let isActive = false;
-      if (tracked_pairs[mac] && ((Date.now()/1000) - tracked_pairs[mac].last_update) <= STALE_THRESHOLD) { isActive = true; }
+      if (window.tracked_pairs && window.tracked_pairs[mac] && ((Date.now()/1000) - window.tracked_pairs[mac].last_update) <= STALE_THRESHOLD) { isActive = true; }
       if (!isActive && !historicalDrones[mac]) continue;
       pilotPathCoords[mac] = data.pilotPaths[mac];
       if (pilotPolylines[mac]) { map.removeLayer(pilotPolylines[mac]); }
@@ -3891,8 +3899,10 @@ function updateColor(mac, hue) {
   colorOverrides[mac] = hue;
   localStorage.setItem('colorOverrides', JSON.stringify(colorOverrides));
   var newColor = "hsl(" + hue + ", 70%, 50%)";
-  if (droneMarkers[mac]) { droneMarkers[mac].setIcon(createIcon('🛸', newColor)); droneMarkers[mac].setPopupContent(generatePopupContent(tracked_pairs[mac], 'drone')); }
-  if (pilotMarkers[mac]) { pilotMarkers[mac].setIcon(createIcon('👤', newColor)); pilotMarkers[mac].setPopupContent(generatePopupContent(tracked_pairs[mac], 'pilot')); }
+  // Guard tracked_pairs[mac]: a marker restored from localStorage for a MAC the
+  // server no longer tracks would otherwise throw inside generatePopupContent.
+  if (droneMarkers[mac]) { droneMarkers[mac].setIcon(createIcon('🛸', newColor)); if (window.tracked_pairs && window.tracked_pairs[mac]) droneMarkers[mac].setPopupContent(generatePopupContent(window.tracked_pairs[mac], 'drone')); }
+  if (pilotMarkers[mac]) { pilotMarkers[mac].setIcon(createIcon('👤', newColor)); if (window.tracked_pairs && window.tracked_pairs[mac]) pilotMarkers[mac].setPopupContent(generatePopupContent(window.tracked_pairs[mac], 'pilot')); }
   if (droneCircles[mac]) { droneCircles[mac].setStyle({ color: newColor, fillColor: newColor }); }
   if (pilotCircles[mac]) { pilotCircles[mac].setStyle({ color: newColor, fillColor: newColor }); }
   if (dronePolylines[mac]) { dronePolylines[mac].setStyle({ color: newColor }); }
