@@ -50,9 +50,14 @@ void rx5808_init() {
 }
 
 void rx5808_set_frequency(uint16_t freq_mhz) {
-    // Synthesizer B register value — RotorHazard / Chorus RF Laptimer formula.
-    // Resolves to within ~1 MHz of the target, well inside FPV analog bandwidth.
-    uint16_t reg_val = (freq_mhz - 479) / 2;
+    // Synthesizer Register B (RTC6715) is a SPLIT field, not a flat value:
+    //   bits [6:0]  = A counter (7 bits)
+    //   bits [19:7] = N counter (13 bits)
+    //   tuned RF = 2 * (N * 32 + A) + 479 MHz   (RotorHazard / Chorus formula)
+    // Writing the raw (freq-479)/2 without the N/A split mistunes the receiver
+    // by ~4 GHz (e.g. 5658 MHz -> ~1817 MHz), so nothing is ever detected.
+    uint16_t tf      = (freq_mhz - 479) / 2;
+    uint16_t reg_val = ((tf / 32) << 7) | (tf % 32);
 
     // 25-bit SPI word (LSB first):
     //   bits  [3:0] = register address 0x01 (Synthesizer B)

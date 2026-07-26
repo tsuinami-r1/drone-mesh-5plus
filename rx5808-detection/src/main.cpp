@@ -136,6 +136,12 @@ void setup() {
 
     rx5808_init();
 
+    // Pre-age the per-channel report timers so a transmitter already active at
+    // boot is reported on the first sweep instead of being suppressed for the
+    // first REPORT_INTERVAL_MS (millis() starts near 0 -> now - 0 < interval).
+    for (int i = 0; i < FPV_CHANNEL_COUNT; i++)
+        last_report_ms[i] = (unsigned long)0 - REPORT_INTERVAL_MS;
+
     Serial.printf(
         "{\"info\":\"RX5808 scanner ready\",\"node_id\":\"%s\","
         "\"channels\":%d,\"threshold\":%d}\n",
