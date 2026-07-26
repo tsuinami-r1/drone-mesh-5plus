@@ -87,9 +87,23 @@ static BLEScan *pBLEScan = nullptr;
 static SemaphoreHandle_t g_serial_mux = nullptr;
 
 static inline void serial_println_locked(const char *s) {
-  xSemaphoreTake(g_serial_mux, pdMS_TO_TICKS(100));
-  Serial.println(s);
-  xSemaphoreGive(g_serial_mux);
+  // Honor the take result: on timeout, drop the line rather than print
+  // unsynchronized OR give a mutex this task does not hold — the latter trips
+  // configASSERT in xTaskPriorityDisinherit and reboots the node.
+  if (xSemaphoreTake(g_serial_mux, pdMS_TO_TICKS(100)) == pdTRUE) {
+    Serial.println(s);
+    xSemaphoreGive(g_serial_mux);
+  }
+}
+
+// Serialize a Serial1 (mesh UART) write under the same mutex so mesh output
+// cannot interleave with USB JSON or another task's Serial1 output.
+static inline void serial1_println_locked(const char *s, int min_free) {
+  if (xSemaphoreTake(g_serial_mux, pdMS_TO_TICKS(100)) == pdTRUE) {
+    if (Serial1.availableForWrite() >= min_free)
+      Serial1.println(s);
+    xSemaphoreGive(g_serial_mux);
+  }
 }
 
 void event_handler(void *ctx, esp_event_base_t event_base, int32_t event_id, void *event_data) {
@@ -257,18 +271,14 @@ void print_compact_message(struct uav_data *UAV) {
                         " https://maps.google.com/?q=%.6f,%.6f",
                         UAV->lat_d, UAV->long_d);
   }
-  if (Serial1.availableForWrite() >= msg_len) {
-    Serial1.println(mesh_msg);
-  }
-  
+  serial1_println_locked(mesh_msg, msg_len);
+
   if (UAV->base_lat_d != 0.0 && UAV->base_long_d != 0.0) {
     char pilot_msg[MAX_MESH_SIZE];
     int pilot_len = snprintf(pilot_msg, sizeof(pilot_msg),
                              "Pilot: https://maps.google.com/?q=%.6f,%.6f",
                              UAV->base_lat_d, UAV->base_long_d);
-    if (Serial1.availableForWrite() >= pilot_len) {
-      Serial1.println(pilot_msg);
-    }
+    serial1_println_locked(pilot_msg, pilot_len);
   }
 }
 
@@ -343,8 +353,7 @@ void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
               if (dji.lat != 0.0 && dji.lon != 0.0 && n < (int)sizeof(mesh_buf) - 2)
                 n += snprintf(mesh_buf + n, sizeof(mesh_buf) - n,
                               " https://maps.google.com/?q=%.6f,%.6f", dji.lat, dji.lon);
-              if (Serial1.availableForWrite() >= n + 2)
-                Serial1.println(mesh_buf);
+              serial1_println_locked(mesh_buf, n + 2);
               dji_last_mesh = millis();
             }
             printed = true;
