@@ -7,7 +7,9 @@
 [![ESP32](https://img.shields.io/badge/ESP32-Compatible-green.svg)](https://www.espressif.com/)
 [![Flask](https://img.shields.io/badge/Flask-2.0+-red.svg)](https://flask.palletsprojects.com/)
 
-**Real-time drone detection, mapping, and Remote ID monitoring — ASTM OpenDroneID + DJI DroneID + MAVLink**
+**A private, discreet, solar-powered counter-surveillance network for drone detection**
+
+Real-time Remote ID, DJI DroneID, MAVLink & analog-FPV mapping over a Meshtastic-linked mesh of unattended ESP32 nodes
 
 [🚀 Quick Start](#-quick-start) • [📋 Features](#-features) • [🛠️ API Reference](#-api-reference) • [🔧 Hardware](#-hardware-setup)
 
@@ -25,6 +27,44 @@ Slava Ukraini.
 Advanced drone detection system that captures and maps Remote ID broadcasts from drones using ESP32 hardware. Features real-time web interface, persistent tracking across sessions, and comprehensive data export capabilities.
 
 Original code by Luke Switzer and ColonelPanic. Currently prototyping RX5808 integration for analog 5.8 GHz FM scanning.
+
+---
+
+## 🛰️ **Intended use & deployment model**
+
+This is a **private, discreet counter-surveillance drone-detection network** — not a
+single sensor on a bench. The goal is persistent, low-profile awareness of drone
+activity over an area you care about (a property, a site, an event), built from a mesh
+of **unattended, self-powered field nodes**.
+
+**The counter-surveillance job:** answer *"is something watching this area, and from
+where?"* Each detection is mapped in real time, and where the protocol exposes it, so
+is the **operator / pilot location** — turning a drone overflight into an actionable
+picture of who is flying and from where, without ever tipping them off.
+
+**How it is meant to be deployed:**
+
+- **Distributed, receive-only nodes.** Each node is a XIAO ESP32 (S3 or C5) that
+  *passively* listens for drone Remote ID, DJI DroneID, MAVLink, and analog FPV video.
+  Nodes **transmit nothing over the air to detect a drone**, so the network itself
+  stays quiet, low-power, and hard to spot — discretion is a design property, not an
+  afterthought.
+- **Meshtastic backhaul — no infrastructure needed.** Each node pairs with a Heltec
+  LoRa (Meshtastic) radio over UART. Detections travel home over the **encrypted LoRa
+  mesh** — no Wi-Fi, no cellular, no internet backhaul. This is what lets the network
+  blanket a wide area, including places with no power or connectivity.
+- **Remote, unattended, solar-powered.** Nodes run standalone in the field; the
+  reference build is **solar powered**. There is no operator at the node — it wakes,
+  listens, relays over the mesh, and keeps running. The firmware is hardened for
+  continuous unattended operation (watchdog reset, serial reconnect loops, bounded
+  over-the-air parsers, per-node mesh rate-limiting).
+- **One collection point.** A single machine (a laptop or Raspberry Pi) runs
+  `mesh-mapper.py`, ingests the mesh via a paired "home" node on USB, and serves the
+  live map, detection history, and TAK/ATAK feed. Only this endpoint needs an operator;
+  everything upstream is autonomous.
+
+**Scale:** a multi-node, city-wide mesh running a mix of XIAO ESP32-S3 and ESP32-C5
+detection nodes simultaneously, each named to match its paired Meshtastic node.
 
 ### Protocol coverage
 
@@ -262,10 +302,11 @@ Real-time events pushed to connected clients:
 ## 🔧 **Hardware Setup**
 
 ### **Supported ESP32 Boards**
-- ✅ **Xiao ESP32-C3** (Single core, WiFi only)
-- ✅ **Xiao ESP32-S3** (Dual core, WiFi + Bluetooth)  
-- ✅ **ESP32-DevKit** (Development and testing)
-- ✅ **Custom PCBs** (See Tindie store link below)
+- ✅ **XIAO ESP32-S3** (dual-core, Wi-Fi + BLE) — primary detection node
+- ✅ **XIAO ESP32-C5** (dual-band 2.4 + 5 GHz Wi-Fi, BLE 5.0 + Coded PHY long range) — primary detection node
+- ✅ **XIAO ESP32-C3** (single-core, Wi-Fi only — legacy; no BLE Remote ID)
+- ✅ **ESP32-DevKit** (development and testing)
+- ✅ **Custom PCBs** (see Tindie store link below)
 
 ### **Wiring for Mesh Integration**
 ```
@@ -449,10 +490,10 @@ Open `rx5808-detection/src/main.cpp` and change `NODE_ID` to something unique pe
 
 **Step 2 — (Optional) Adjust RSSI threshold**
 
-Open `rx5808-detection/src/rx5808.h`. The default of `1800` is a safe starting point; tune after calibration.
+Open `rx5808-detection/src/rx5808.h`. The default of `600` is a safe starting point; tune after calibration. (The RX5808 RSSI output swings ~0–1 V, which is ~0–1320 ADC counts at 12-bit / ADC_11db — so the threshold must sit inside that range.)
 
 ```cpp
-#define RSSI_THRESHOLD   1800   // raise if you get false positives
+#define RSSI_THRESHOLD   600   // raise if you get false positives
 ```
 
 **Step 3 — Wire the hardware**
@@ -481,7 +522,7 @@ pio device monitor --baud 115200
 
 You should see within a few seconds:
 ```json
-{"info":"RX5808 scanner ready","node_id":"RX01","channels":40,"threshold":1800}
+{"info":"RX5808 scanner ready","node_id":"RX01","channels":40,"threshold":600}
 ```
 
 If nothing appears for >5 s, check USB-CDC enumeration: the XIAO waits up to 3 s for a host connection before emitting. Replug and reopen the monitor.
@@ -517,7 +558,7 @@ pio device monitor --baud 115200
 
 On power-up you should see on the serial monitor:
 ```json
-{"info":"RX5808 scanner ready","node_id":"RX01","channels":40,"threshold":1800}
+{"info":"RX5808 scanner ready","node_id":"RX01","channels":40,"threshold":600}
 ```
 
 ### Configuration
@@ -526,7 +567,7 @@ All tuneable constants are at the top of the relevant source files:
 
 | Constant | File | Default | Description |
 |----------|------|---------|-------------|
-| `RSSI_THRESHOLD` | `src/rx5808.h` | `1800` | ADC count (0–4095) above which a signal is reported |
+| `RSSI_THRESHOLD` | `src/rx5808.h` | `600` | ADC count above which a signal is reported (RX5808 RSSI spans ~0–1320 counts) |
 | `RSSI_SAMPLES` | `src/rx5808.h` | `10` | ADC reads averaged per RSSI measurement |
 | `TUNE_SETTLE_MS` | `src/rx5808.h` | `30` | ms to wait for RX5808 PLL after tuning |
 | `NODE_ID` | `src/main.cpp` | `"RX01"` | Change per device for multi-node dedup |
@@ -554,8 +595,8 @@ Each hit produces a JSON line on USB Serial (consumed by `mesh-mapper.py`):
   "freq_mhz": 5658,
   "band":     "R",
   "ch":       1,
-  "rssi_raw": 2240,
-  "rssi":     2240,
+  "rssi_raw": 850,
+  "rssi":     850,
   "basic_id": "5.8G-R1-5658MHz",
   "node_id":  "RX01"
 }
@@ -568,7 +609,7 @@ channels share the same identifier.
 If `ENABLE_MESH_RELAY` is on, a compact human-readable message is also sent to
 the Heltec relay:
 ```
-AnalogFM: R1 5658MHz rssi=2240 [RX01]
+AnalogFM: R1 5658MHz rssi=850 [RX01]
 ```
 
 ### Integration with mesh-mapper.py
