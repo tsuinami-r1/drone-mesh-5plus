@@ -46,7 +46,8 @@ static inline bool mav_parse_gps(const uint8_t *buf, int len, mav_gps_t *out) {
                 out->lon     = lon_e7   / 1e7;
                 out->alt_msl = alt_mm   / 1000.0f;
                 out->alt_agl = rel_mm   / 1000.0f;
-                out->hdg     = hdg_cdeg / 100.0f;
+                /* 0xFFFF = heading unknown; map to 0 rather than a bogus 655 deg */
+                out->hdg     = (hdg_cdeg == 0xFFFF) ? 0.0f : hdg_cdeg / 100.0f;
                 return true;
             }
             i += 8 + plen;
@@ -57,8 +58,15 @@ static inline bool mav_parse_gps(const uint8_t *buf, int len, mav_gps_t *out) {
             uint32_t msg_id = (uint32_t)buf[i+7]
                             | ((uint32_t)buf[i+8] << 8)
                             | ((uint32_t)buf[i+9] << 16);
-            if (msg_id == MAV_MSG_GLOBAL_POSITION_INT && plen >= 28) {
-                const uint8_t *p = buf + i + 10;
+            /* plen >= 12 guarantees lat/lon are present; MAVLink v2 strips
+             * trailing zero bytes, so alt/velocity/heading may be truncated.
+             * Zero-fill to the full 28-byte payload so a near-north heading
+             * (byte 27 == 0) or a zero field is reconstructed, not rejected. */
+            if (msg_id == MAV_MSG_GLOBAL_POSITION_INT && plen >= 12) {
+                uint8_t full[28] = {0};
+                int copy = plen < 28 ? plen : 28;
+                memcpy(full, buf + i + 10, copy);
+                const uint8_t *p = full;
                 int32_t lat_e7, lon_e7, alt_mm, rel_mm;
                 uint16_t hdg_cdeg;
                 memcpy(&lat_e7,   p + 4,  4);
@@ -70,7 +78,8 @@ static inline bool mav_parse_gps(const uint8_t *buf, int len, mav_gps_t *out) {
                 out->lon     = lon_e7   / 1e7;
                 out->alt_msl = alt_mm   / 1000.0f;
                 out->alt_agl = rel_mm   / 1000.0f;
-                out->hdg     = hdg_cdeg / 100.0f;
+                /* 0xFFFF = heading unknown; map to 0 rather than a bogus 655 deg */
+                out->hdg     = (hdg_cdeg == 0xFFFF) ? 0.0f : hdg_cdeg / 100.0f;
                 return true;
             }
             i += 12 + plen;

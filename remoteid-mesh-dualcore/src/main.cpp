@@ -1,5 +1,7 @@
-#if !defined(ARDUINO_ARCH_ESP32)
-  #error "This program requires an ESP32S3"
+#if !defined(CONFIG_IDF_TARGET_ESP32S3)
+  /* Tasks are pinned to core 1, so this firmware needs the dual-core ESP32-S3.
+     A single-core target (e.g. C6) would abort in xTaskCreatePinnedToCore. */
+  #error "This program requires a dual-core ESP32-S3"
 #endif
 
 #include <Arduino.h>
