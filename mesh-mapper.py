@@ -82,7 +82,14 @@ def cleanup_old_detections():
                 detection['status'] = 'inactive_old'
             elif age > staleThreshold * 3:  # 3 minutes
                 detection['status'] = 'inactive'
-    
+
+        # Once a drone has been silent for a while, drop it from the no-GPS alert
+        # set so a later reappearance re-fires the webhook. should_trigger_webhook_
+        # earliest cannot clear it: it stamps last_update just before its own
+        # recent-transmission check, which is therefore always true.
+        if age > 30:
+            backend_alerted_no_gps.discard(mac)
+
     # Prune stale inbound TAK contacts
     with TAK_CONTACTS_LOCK:
         stale_uids = [uid for uid, c in tak_contacts.items()
@@ -342,7 +349,10 @@ def _cot_event(uid, cot_type, lat, lon, hae, stale_s, callsign, remarks,
                extra_detail=""):
     now   = datetime.now(timezone.utc)
     stale = now + timedelta(seconds=stale_s)
-    cs    = callsign.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    # callsign is placed in a double-quoted XML attribute, so " and ' must also
+    # be escaped (basic_id is attacker-controlled over-the-air data).
+    cs    = (callsign.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+             .replace('"', "&quot;").replace("'", "&apos;"))
     rm    = remarks.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     return (
         '<?xml version="1.0" encoding="UTF-8"?>'
@@ -852,7 +862,7 @@ def generate_kml():
         flight_idx = 1
         last_ts = None
         current_flight = []
-        for det in detection_history:
+        for det in list(detection_history):
             if det.get('mac') != mac:
                 continue
             lat, lon = det.get('drone_lat'), det.get('drone_long')
@@ -1085,6 +1095,33 @@ def update_detection(detection):
     new_drone_lat = detection.get("drone_lat", 0)
     new_drone_long = detection.get("drone_long", 0)
     valid_drone = (new_drone_lat != 0 and new_drone_long != 0)
+    real_gps = valid_drone  # did THIS advert actually carry a GPS fix?
+
+    # Per-advert BLE firmware (remoteid-mesh) splits BasicID / Location / System
+    # across separate advertisements, so a non-Location advert arrives with no
+    # coordinates. Bridge the gap by carrying the last known position forward —
+    # but only for up to 30 s since the last *real* GPS fix (tracked separately
+    # from last_update, which every advert refreshes). A drone that genuinely
+    # loses GPS, or only ever sent one Location, then reverts to no-GPS instead
+    # of showing a frozen position forever. analog_fm has no drone GPS by design.
+    if not valid_drone and detection.get("type") != "analog_fm":
+        prev = tracked_pairs.get(mac)
+        if prev:
+            prev_gps_ts = prev.get("last_gps_update", 0)
+            prev_lat = prev.get("drone_lat", 0)
+            prev_long = prev.get("drone_long", 0)
+            if prev_lat and prev_long and prev_gps_ts and (time.time() - prev_gps_ts <= 30):
+                new_drone_lat = prev_lat
+                new_drone_long = prev_long
+                detection["drone_lat"] = prev_lat
+                detection["drone_long"] = prev_long
+                detection["last_gps_update"] = prev_gps_ts  # keep the ORIGINAL fix time
+                if not detection.get("drone_altitude"):
+                    detection["drone_altitude"] = prev.get("drone_altitude", 0)
+                if not (detection.get("pilot_lat") and detection.get("pilot_long")):
+                    detection["pilot_lat"] = prev.get("pilot_lat", 0)
+                    detection["pilot_long"] = prev.get("pilot_long", 0)
+                valid_drone = True
 
     if not valid_drone:
         logger.debug(f"No-GPS detection for {mac}; forwarding for processing.")
@@ -1177,6 +1214,11 @@ def update_detection(detection):
     detection["pilot_lat"] = detection.get("pilot_lat", 0)
     detection["pilot_long"] = detection.get("pilot_long", 0)
     detection["last_update"] = time.time()
+    # Stamp the real-GPS timestamp only when THIS advert carried a fix; a
+    # carried-forward position (real_gps False) keeps the original fix time set
+    # in the merge above, so the 30 s carry-forward window measures GPS age.
+    if real_gps:
+        detection["last_gps_update"] = time.time()
     # Mark as active since this is a fresh detection
     detection["status"] = "active"
 
@@ -3367,9 +3409,12 @@ function get_color_for_mac(mac) {
 
 // ---- RX5808 Analog FM helpers ----
 function rfRssiToColor(rssi_raw) {
-  // Strong (>= 3000) → green, medium (>= 2200) → amber, weak → red
-  if (rssi_raw >= 3000) return '#00dd44';
-  if (rssi_raw >= 2200) return '#ffaa00';
+  // RX5808 RSSI spans ~0-1320 ADC counts (0-1 V at 12-bit / ADC_11db), and only
+  // signals above RSSI_THRESHOLD (default 600) reach the map. Colour by strength
+  // within that band: strong >= 1000 -> green, medium >= 800 -> amber, weak -> red.
+  // (Previous 3000/2200 thresholds were above the ADC max, so every ring was red.)
+  if (rssi_raw >= 1000) return '#00dd44';
+  if (rssi_raw >= 800)  return '#ffaa00';
   return '#ff4422';
 }
 
@@ -3446,6 +3491,10 @@ function updateComboList(data) {
       item.className = "drone-item";
       item.addEventListener("dblclick", () => {
          restorePaths();
+         // Resolve the CURRENT detection at click time — this listener is bound
+         // once when the item is created, so the captured `detection` is the
+         // first-seen snapshot; pinning it would use a stale location.
+         const detNow = (window.tracked_pairs && window.tracked_pairs[mac]) || detection;
          if (historicalDrones[mac]) {
              delete historicalDrones[mac];
              localStorage.setItem('historicalDrones', JSON.stringify(historicalDrones));
@@ -3454,13 +3503,13 @@ function updateComboList(data) {
              item.classList.remove("selected");
              map.closePopup();
          } else {
-             historicalDrones[mac] = Object.assign({}, detection, { userLocked: true, lockTime: Date.now()/1000 });
+             historicalDrones[mac] = Object.assign({}, detNow, { userLocked: true, lockTime: Date.now()/1000 });
              localStorage.setItem('historicalDrones', JSON.stringify(historicalDrones));
              showHistoricalDrone(mac, historicalDrones[mac]);
              item.classList.add("selected");
              openAliasPopup(mac);
-             if (detection && detection.drone_lat && detection.drone_long && detection.drone_lat != 0 && detection.drone_long != 0) {
-                 safeSetView([detection.drone_lat, detection.drone_long], 18);
+             if (detNow && detNow.drone_lat && detNow.drone_long && detNow.drone_lat != 0 && detNow.drone_long != 0) {
+                 safeSetView([detNow.drone_lat, detNow.drone_long], 18);
              }
          }
       });
@@ -3544,8 +3593,12 @@ async function updateData() {
         previousActive[mac] = false;
         continue;
       }
-      const droneLat = det.drone_lat, droneLng = det.drone_long;
-      const pilotLat = det.pilot_lat, pilotLng = det.pilot_long;
+      // Coerce missing coords to 0: detections without drone/pilot GPS (e.g.
+      // analog_fm) omit these keys, and `undefined !== 0` would otherwise read
+      // as a valid coordinate — firing the OpenDroneID "drone detected" popup
+      // for an FM video signal and reaching the drone-marker code with NaNs.
+      const droneLat = det.drone_lat || 0, droneLng = det.drone_long || 0;
+      const pilotLat = det.pilot_lat || 0, pilotLng = det.pilot_long || 0;
       const validDrone = (droneLat !== 0 && droneLng !== 0);
       // State-change popup logic
       const alias     = aliases[mac];
@@ -3835,7 +3888,7 @@ async function restorePaths() {
     const data = await response.json();
     for (const mac in data.dronePaths) {
       let isActive = false;
-      if (tracked_pairs[mac] && ((Date.now()/1000) - tracked_pairs[mac].last_update) <= STALE_THRESHOLD) { isActive = true; }
+      if (window.tracked_pairs && window.tracked_pairs[mac] && ((Date.now()/1000) - window.tracked_pairs[mac].last_update) <= STALE_THRESHOLD) { isActive = true; }
       if (!isActive && !historicalDrones[mac]) continue;
       dronePathCoords[mac] = data.dronePaths[mac];
       if (dronePolylines[mac]) { map.removeLayer(dronePolylines[mac]); }
@@ -3844,7 +3897,7 @@ async function restorePaths() {
     }
     for (const mac in data.pilotPaths) {
       let isActive = false;
-      if (tracked_pairs[mac] && ((Date.now()/1000) - tracked_pairs[mac].last_update) <= STALE_THRESHOLD) { isActive = true; }
+      if (window.tracked_pairs && window.tracked_pairs[mac] && ((Date.now()/1000) - window.tracked_pairs[mac].last_update) <= STALE_THRESHOLD) { isActive = true; }
       if (!isActive && !historicalDrones[mac]) continue;
       pilotPathCoords[mac] = data.pilotPaths[mac];
       if (pilotPolylines[mac]) { map.removeLayer(pilotPolylines[mac]); }
@@ -3860,8 +3913,10 @@ function updateColor(mac, hue) {
   colorOverrides[mac] = hue;
   localStorage.setItem('colorOverrides', JSON.stringify(colorOverrides));
   var newColor = "hsl(" + hue + ", 70%, 50%)";
-  if (droneMarkers[mac]) { droneMarkers[mac].setIcon(createIcon('🛸', newColor)); droneMarkers[mac].setPopupContent(generatePopupContent(tracked_pairs[mac], 'drone')); }
-  if (pilotMarkers[mac]) { pilotMarkers[mac].setIcon(createIcon('👤', newColor)); pilotMarkers[mac].setPopupContent(generatePopupContent(tracked_pairs[mac], 'pilot')); }
+  // Guard tracked_pairs[mac]: a marker restored from localStorage for a MAC the
+  // server no longer tracks would otherwise throw inside generatePopupContent.
+  if (droneMarkers[mac]) { droneMarkers[mac].setIcon(createIcon('🛸', newColor)); if (window.tracked_pairs && window.tracked_pairs[mac]) droneMarkers[mac].setPopupContent(generatePopupContent(window.tracked_pairs[mac], 'drone')); }
+  if (pilotMarkers[mac]) { pilotMarkers[mac].setIcon(createIcon('👤', newColor)); if (window.tracked_pairs && window.tracked_pairs[mac]) pilotMarkers[mac].setPopupContent(generatePopupContent(window.tracked_pairs[mac], 'pilot')); }
   if (droneCircles[mac]) { droneCircles[mac].setStyle({ color: newColor, fillColor: newColor }); }
   if (pilotCircles[mac]) { pilotCircles[mac].setStyle({ color: newColor, fillColor: newColor }); }
   if (dronePolylines[mac]) { dronePolylines[mac].setStyle({ color: newColor }); }
@@ -4090,7 +4145,9 @@ def post_detection():
 @app.route('/api/detections_history', methods=['GET'])
 def api_detections_history():
     features = []
-    for det in detection_history:
+    # Snapshot the deque: serial threads append concurrently, and iterating a
+    # deque while it is mutated raises RuntimeError.
+    for det in list(detection_history):
         if det.get("drone_lat", 0) == 0 and det.get("drone_long", 0) == 0:
             continue
         features.append({
@@ -4166,7 +4223,8 @@ def api_selected_ports():
 def api_paths():
     drone_paths = {}
     pilot_paths = {}
-    for det in detection_history:
+    # Snapshot the deque; serial threads append concurrently.
+    for det in list(detection_history):
         mac = det.get("mac")
         if not mac:
             continue
@@ -4266,29 +4324,29 @@ def serial_reader(port):
                 try:
                     detection = json.loads(json_str)
                     logger.debug(f"Parsed JSON from {port}: {detection}")
-                    
-                    # MAC tracking logic...
+
+                    # Status/info/heartbeat frames carry no detection payload and
+                    # MUST be skipped BEFORE the cached-MAC backfill below.
+                    # Otherwise the injected 'mac' makes a firmware status line
+                    # (e.g. the C5 emits {"status":"active",...} every 60 s) look
+                    # like a detection and overwrite the last drone's tracked state.
+                    _detection_keys = ('drone_lat', 'pilot_lat', 'basic_id', 'remote_id')
+                    if (('heartbeat' in detection or 'status' in detection or 'info' in detection)
+                            and not any(k in detection for k in _detection_keys)):
+                        logger.debug(f"Skipping status/info/heartbeat from {port}: {detection}")
+                        continue
+
+                    # MAC tracking: remember the MAC from real detections and
+                    # backfill it onto detections that omit it.
                     if 'mac' in detection:
                         last_mac_by_port[port] = detection['mac']
-                        logger.debug(f"Found MAC in detection: {detection['mac']}")
                     elif port in last_mac_by_port:
                         detection['mac'] = last_mac_by_port[port]
-                        logger.debug(f"Using cached MAC for {port}: {detection['mac']}")
                     else:
                         logger.warning(f"No MAC found in detection from {port}: {detection}")
-                    
-                    # Skip heartbeat messages
-                    if 'heartbeat' in detection:
-                        logger.debug(f"Skipping heartbeat from {port}")
-                        continue
 
-                    # Skip status/info messages without detection data
-                    if 'info' in detection and not any(k in detection for k in ['mac', 'drone_lat', 'pilot_lat', 'basic_id', 'remote_id']):
-                        logger.debug(f"Skipping info message from {port}: {detection}")
-                        continue
-
-                    # Skip status messages without detection data
-                    if not any(key in detection for key in ['mac', 'drone_lat', 'pilot_lat', 'basic_id', 'remote_id']):
+                    # Skip anything that still has neither a MAC nor detection data.
+                    if not any(key in detection for key in ('mac',) + _detection_keys):
                         logger.debug(f"Skipping non-detection message from {port}: {detection}")
                         continue
 
@@ -4371,9 +4429,21 @@ def serial_reader(port):
     
     logger.info(f"Serial reader thread for {port} shutting down. Total data packets received: {data_received_count}")
 
+# Track live serial_reader threads per port so a duplicate is never spawned for
+# a port that already has a reader in its reconnect loop (serial_connected_status
+# is False during reconnect, so it cannot gate this).
+serial_threads = {}
+serial_threads_lock = threading.Lock()
+
 def start_serial_thread(port):
-    thread = threading.Thread(target=serial_reader, args=(port,), daemon=True)
-    thread.start()
+    with serial_threads_lock:
+        existing = serial_threads.get(port)
+        if existing is not None and existing.is_alive():
+            logger.debug(f"Serial reader for {port} already running; not starting another")
+            return
+        thread = threading.Thread(target=serial_reader, args=(port,), daemon=True)
+        serial_threads[port] = thread
+        thread.start()
 
 # Download endpoints for CSV, KML, and Aliases files
 @app.route('/download/csv')
@@ -4629,7 +4699,7 @@ def api_diagnostics():
     
     # Add recent detections if any exist
     if detection_history:
-        recent_detections = detection_history[-5:]  # Last 5 detections
+        recent_detections = list(detection_history)[-5:]  # Last 5 detections (deque has no slicing)
         diagnostics["recent_detections"] = [
             {
                 "mac": d.get("mac", "N/A"),
@@ -4663,8 +4733,17 @@ def api_send_command():
     results = {}
     
     with serial_objs_lock:
-        ports_to_send = [port] if port and port in serial_objs else list(serial_objs.keys())
-        
+        if port:
+            # A specific port was requested: error if it is not connected rather
+            # than silently broadcasting the command to every other node.
+            if port not in serial_objs:
+                return jsonify({"command": command,
+                                "error": f"port {port} not connected",
+                                "results": {}}), 404
+            ports_to_send = [port]
+        else:
+            ports_to_send = list(serial_objs.keys())
+
         for p in ports_to_send:
             try:
                 ser = serial_objs.get(p)
@@ -4696,7 +4775,8 @@ def handle_connect():
 def get_paths_for_emit():
     drone_paths = {}
     pilot_paths = {}
-    for det in detection_history:
+    # Snapshot the deque; serial threads append concurrently.
+    for det in list(detection_history):
         mac = det.get("mac")
         if not mac:
             continue
@@ -4839,7 +4919,9 @@ def api_meshtastic_url():
         return jsonify({'error': 'node_id and url required'}), 400
     with NODE_LOCATIONS_LOCK:
         MESHTASTIC_URLS[node_id] = url
-    pos = _fetch_meshtastic_position(url)
+    # Pass node_id so the name-match branch is used; otherwise a dense mesh
+    # falls back to the first GPS node and stores the wrong node's position.
+    pos = _fetch_meshtastic_position(url, node_id)
     if pos:
         with NODE_LOCATIONS_LOCK:
             NODE_LOCATIONS[node_id] = {**pos, 'source': 'meshtastic',

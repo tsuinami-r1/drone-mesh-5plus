@@ -70,15 +70,24 @@ static inline bool dji_is_oui(const uint8_t *p) {
     return p[0] == DJI_OUI[0] && p[1] == DJI_OUI[1] && p[2] == DJI_OUI[2];
 }
 
-/* JSON-safe copy: escapes backslash and double-quote so d->serial is safe in JSON strings. */
+/* JSON-safe copy: escapes backslash and double-quote, and replaces any byte
+ * outside printable ASCII (< 0x20 or > 0x7E) with '.', so the value is safe
+ * inside a JSON string and cannot split the newline-delimited serial protocol. */
 static inline void dji_escape_str(const char *src, char *dst, size_t dstlen) {
     size_t i = 0, j = 0;
+    if (dstlen == 0) return;
     while (src[i] && j + 1 < dstlen) {
-        if (src[i] == '"' || src[i] == '\\') {
+        unsigned char c = (unsigned char)src[i];
+        if (c == '"' || c == '\\') {
             if (j + 2 >= dstlen) break;
             dst[j++] = '\\';
+            dst[j++] = (char)c;
+        } else if (c < 0x20 || c > 0x7E) {
+            dst[j++] = '.';
+        } else {
+            dst[j++] = (char)c;
         }
-        dst[j++] = src[i++];
+        i++;
     }
     dst[j] = '\0';
 }

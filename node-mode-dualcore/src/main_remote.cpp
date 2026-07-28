@@ -32,6 +32,7 @@
 #include <nvs_flash.h>
 #include "opendroneid.h"
 #include "odid_wifi.h"
+#include "dji_droneid.h"   /* for dji_escape_str (JSON-safe basic_id) */
 #include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -194,7 +195,10 @@ void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
   // --- NAN Action Frame (WiFi Aware / Neighbor Awareness Networking) ---
   static const uint8_t nan_dest[6] = {0x51, 0x6f, 0x9a, 0x01, 0x00, 0x00};
   if (memcmp(nan_dest, &payload[4], 6) == 0) {
-    if (odid_wifi_receive_message_pack_nan_action_frame(&UAS_data, nullptr, payload, length) == 0) {
+    /* Parser unconditionally writes the 6-byte source MAC to this arg; must be a
+       real buffer, not nullptr (UAV.mac is re-derived from &payload[10] below). */
+    uint8_t nan_src[6];
+    if (odid_wifi_receive_message_pack_nan_action_frame(&UAS_data, (char *)nan_src, payload, length) == 0) {
       uav_data UAV;
       memset(&UAV, 0, sizeof(UAV));
       memcpy(UAV.mac, &payload[10], 6);
@@ -297,12 +301,14 @@ static int buildJson(char *buf, size_t bufSize, const uav_data *UAV) {
            UAV->mac[0], UAV->mac[1], UAV->mac[2],
            UAV->mac[3], UAV->mac[4], UAV->mac[5]);
 
+  char id_esc[48];  /* uav_id is raw over-the-air bytes — escape for JSON safety */
+  dji_escape_str(UAV->uav_id, id_esc, sizeof(id_esc));
   return snprintf(buf, bufSize,
     "{\"mac\":\"%s\",\"rssi\":%d,\"drone_lat\":%.6f,\"drone_long\":%.6f,"
     "\"drone_altitude\":%d,\"pilot_lat\":%.6f,\"pilot_long\":%.6f,"
     "\"basic_id\":\"%s\",\"node_id\":\"%s\"}",
     mac_str, UAV->rssi, UAV->lat_d, UAV->long_d, UAV->altitude_msl,
-    UAV->base_lat_d, UAV->base_long_d, UAV->uav_id, nodeId);
+    UAV->base_lat_d, UAV->base_long_d, id_esc, nodeId);
 }
 
 // =============================================================================

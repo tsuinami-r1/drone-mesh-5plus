@@ -87,9 +87,23 @@ static BLEScan *pBLEScan = nullptr;
 static SemaphoreHandle_t g_serial_mux = nullptr;
 
 static inline void serial_println_locked(const char *s) {
-  xSemaphoreTake(g_serial_mux, pdMS_TO_TICKS(100));
-  Serial.println(s);
-  xSemaphoreGive(g_serial_mux);
+  // Honor the take result: on timeout, drop the line rather than print
+  // unsynchronized OR give a mutex this task does not hold — the latter trips
+  // configASSERT in xTaskPriorityDisinherit and reboots the node.
+  if (xSemaphoreTake(g_serial_mux, pdMS_TO_TICKS(100)) == pdTRUE) {
+    Serial.println(s);
+    xSemaphoreGive(g_serial_mux);
+  }
+}
+
+// Serialize a Serial1 (mesh UART) write under the same mutex so mesh output
+// cannot interleave with USB JSON or another task's Serial1 output.
+static inline void serial1_println_locked(const char *s, int min_free) {
+  if (xSemaphoreTake(g_serial_mux, pdMS_TO_TICKS(100)) == pdTRUE) {
+    if (Serial1.availableForWrite() >= min_free)
+      Serial1.println(s);
+    xSemaphoreGive(g_serial_mux);
+  }
 }
 
 void event_handler(void *ctx, esp_event_base_t event_base, int32_t event_id, void *event_data) {
@@ -106,7 +120,10 @@ public:
 
     const uint8_t *msgs;
     int msgs_len;
-    if (!bt_odid_find_odid(adv, adv_len, &msgs, &msgs_len) || msgs_len < 1) return;
+    if (!bt_odid_find_odid(adv, adv_len, &msgs, &msgs_len)) return;
+    // Decoders read a full 25-byte ODID message; require that many bytes so a
+    // truncated advertisement cannot cause an out-of-bounds read.
+    if (msgs_len < ODID_MESSAGE_SIZE) return;
 
     uav_data uav_buf = {};
     uav_data *UAV = &uav_buf;
@@ -225,10 +242,12 @@ void send_json_fast(struct uav_data *UAV) {
   snprintf(mac_str, sizeof(mac_str), "%02x:%02x:%02x:%02x:%02x:%02x",
            UAV->mac[0], UAV->mac[1], UAV->mac[2],
            UAV->mac[3], UAV->mac[4], UAV->mac[5]);
+  char id_esc[48];  /* uav_id is raw over-the-air bytes — escape for JSON safety */
+  dji_escape_str(UAV->uav_id, id_esc, sizeof(id_esc));
   char json_msg[320];
   snprintf(json_msg, sizeof(json_msg),
     "{\"mac\":\"%s\", \"rssi\":%d, \"drone_lat\":%.6f, \"drone_long\":%.6f, \"drone_altitude\":%d, \"pilot_lat\":%.6f, \"pilot_long\":%.6f, \"basic_id\":\"%s\"}",
-    mac_str, UAV->rssi, UAV->lat_d, UAV->long_d, UAV->altitude_msl, UAV->base_lat_d, UAV->base_long_d, UAV->uav_id);
+    mac_str, UAV->rssi, UAV->lat_d, UAV->long_d, UAV->altitude_msl, UAV->base_lat_d, UAV->base_long_d, id_esc);
   serial_println_locked(json_msg);
 }
 
@@ -255,18 +274,14 @@ void print_compact_message(struct uav_data *UAV) {
                         " https://maps.google.com/?q=%.6f,%.6f",
                         UAV->lat_d, UAV->long_d);
   }
-  if (Serial1.availableForWrite() >= msg_len) {
-    Serial1.println(mesh_msg);
-  }
-  
+  serial1_println_locked(mesh_msg, msg_len);
+
   if (UAV->base_lat_d != 0.0 && UAV->base_long_d != 0.0) {
     char pilot_msg[MAX_MESH_SIZE];
     int pilot_len = snprintf(pilot_msg, sizeof(pilot_msg),
                              "Pilot: https://maps.google.com/?q=%.6f,%.6f",
                              UAV->base_lat_d, UAV->base_long_d);
-    if (Serial1.availableForWrite() >= pilot_len) {
-      Serial1.println(pilot_msg);
-    }
+    serial1_println_locked(pilot_msg, pilot_len);
   }
 }
 
@@ -341,8 +356,7 @@ void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
               if (dji.lat != 0.0 && dji.lon != 0.0 && n < (int)sizeof(mesh_buf) - 2)
                 n += snprintf(mesh_buf + n, sizeof(mesh_buf) - n,
                               " https://maps.google.com/?q=%.6f,%.6f", dji.lat, dji.lon);
-              if (Serial1.availableForWrite() >= n + 2)
-                Serial1.println(mesh_buf);
+              serial1_println_locked(mesh_buf, n + 2);
               dji_last_mesh = millis();
             }
             printed = true;
@@ -352,9 +366,12 @@ void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
         else if (((payload[offset+2] == 0x90 && payload[offset+3] == 0x3a && payload[offset+4] == 0xe6)) ||
                  ((payload[offset+2] == 0xfa && payload[offset+3] == 0x0b && payload[offset+4] == 0xbc))) {
           int j = offset + 7;
-          if (j < length) {
+          /* Bound the ODID pack to this IE's body (len - 5), not the rest of the
+             frame, so a truncated IE cannot consume following IEs. */
+          if (len >= 6 && j < length) {
+            int pack_len = len - 5;
             memset(&UAS_data, 0, sizeof(UAS_data));
-            odid_message_process_pack(&UAS_data, &payload[j], length - j);
+            odid_message_process_pack(&UAS_data, &payload[j], pack_len);
             parse_odid(&UAV, &UAS_data);
             print_compact_message(&UAV);
             send_json_fast(&UAV);
