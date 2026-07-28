@@ -723,7 +723,7 @@ https://www.pcbway.com/
 Get professional PCBs and complete kits:
 
 <a href="https://www.tindie.com/stores/colonel_panic/?ref=offsite_badges&utm_source=sellers_colonel_panic&utm_medium=badges&utm_campaign=badge_large">
-    <img src="https://d2ss6ovg47m0r5.cloudfront.net/badges/tindie-larges.png" alt="I sell on Tindie" width="200" height="104">
+    <img src="https://d2ss6ovg47m0r5.cloudfront.net/badges/tindie-larges.png" alt="ColonelPanic's PCB's, Tindie store" width="200" height="104">
 </a>
 
 ---
