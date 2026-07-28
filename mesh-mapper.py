@@ -1095,21 +1095,27 @@ def update_detection(detection):
     new_drone_lat = detection.get("drone_lat", 0)
     new_drone_long = detection.get("drone_long", 0)
     valid_drone = (new_drone_lat != 0 and new_drone_long != 0)
+    real_gps = valid_drone  # did THIS advert actually carry a GPS fix?
 
     # Per-advert BLE firmware (remoteid-mesh) splits BasicID / Location / System
     # across separate advertisements, so a non-Location advert arrives with no
-    # coordinates. Carry the last known position forward instead of letting it
-    # wipe the track to "no GPS". analog_fm has no drone GPS by design, so skip it.
+    # coordinates. Bridge the gap by carrying the last known position forward —
+    # but only for up to 30 s since the last *real* GPS fix (tracked separately
+    # from last_update, which every advert refreshes). A drone that genuinely
+    # loses GPS, or only ever sent one Location, then reverts to no-GPS instead
+    # of showing a frozen position forever. analog_fm has no drone GPS by design.
     if not valid_drone and detection.get("type") != "analog_fm":
         prev = tracked_pairs.get(mac)
-        if prev and prev.get("last_update") and (time.time() - prev["last_update"] <= 30):
+        if prev:
+            prev_gps_ts = prev.get("last_gps_update", 0)
             prev_lat = prev.get("drone_lat", 0)
             prev_long = prev.get("drone_long", 0)
-            if prev_lat and prev_long:
+            if prev_lat and prev_long and prev_gps_ts and (time.time() - prev_gps_ts <= 30):
                 new_drone_lat = prev_lat
                 new_drone_long = prev_long
                 detection["drone_lat"] = prev_lat
                 detection["drone_long"] = prev_long
+                detection["last_gps_update"] = prev_gps_ts  # keep the ORIGINAL fix time
                 if not detection.get("drone_altitude"):
                     detection["drone_altitude"] = prev.get("drone_altitude", 0)
                 if not (detection.get("pilot_lat") and detection.get("pilot_long")):
@@ -1208,6 +1214,11 @@ def update_detection(detection):
     detection["pilot_lat"] = detection.get("pilot_lat", 0)
     detection["pilot_long"] = detection.get("pilot_long", 0)
     detection["last_update"] = time.time()
+    # Stamp the real-GPS timestamp only when THIS advert carried a fix; a
+    # carried-forward position (real_gps False) keeps the original fix time set
+    # in the merge above, so the 30 s carry-forward window measures GPS age.
+    if real_gps:
+        detection["last_gps_update"] = time.time()
     # Mark as active since this is a fresh detection
     detection["status"] = "active"
 
