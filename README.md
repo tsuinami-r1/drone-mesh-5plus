@@ -641,7 +641,7 @@ POST /api/node_location  { "node_id": "RX01", "lat": 25.7617, "lon": -80.1918 }
 
 Differences from RemoteID detections:
 - `type: "analog_fm"` is logged at INFO level with band/channel/RSSI.
-- Range rings are colored by signal strength: green ≥ 3000, amber ≥ 2200, red below.
+- Range rings are colored by signal strength: green ≥ 1000, amber ≥ 800, red below (within the RX5808's ~0–1320 ADC-count range).
 - Each detection is also forwarded to ATAK/WinTAK as two CoT events: a `a-u-G-E-S` sensor marker and a `u-r-b-c-c` range ring shape.
 
 ### Channel Map

@@ -3398,9 +3398,12 @@ function get_color_for_mac(mac) {
 
 // ---- RX5808 Analog FM helpers ----
 function rfRssiToColor(rssi_raw) {
-  // Strong (>= 3000) → green, medium (>= 2200) → amber, weak → red
-  if (rssi_raw >= 3000) return '#00dd44';
-  if (rssi_raw >= 2200) return '#ffaa00';
+  // RX5808 RSSI spans ~0-1320 ADC counts (0-1 V at 12-bit / ADC_11db), and only
+  // signals above RSSI_THRESHOLD (default 600) reach the map. Colour by strength
+  // within that band: strong >= 1000 -> green, medium >= 800 -> amber, weak -> red.
+  // (Previous 3000/2200 thresholds were above the ADC max, so every ring was red.)
+  if (rssi_raw >= 1000) return '#00dd44';
+  if (rssi_raw >= 800)  return '#ffaa00';
   return '#ff4422';
 }
 
