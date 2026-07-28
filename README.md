@@ -53,6 +53,7 @@ picture of who is flying and from where, without ever tipping them off.
   LoRa (Meshtastic) radio over UART. Detections travel home over the **encrypted LoRa
   mesh** — no Wi-Fi, no cellular, no internet backhaul. This is what lets the network
   blanket a wide area, including places with no power or connectivity.
+  Alternatively, if deployed on a rooftop - MQTT via the building's network is also possible.
 - **Remote, unattended, solar-powered.** Nodes run standalone in the field; the
   reference build is **solar powered**. There is no operator at the node — it wakes,
   listens, relays over the mesh, and keeps running. The firmware is hardened for
