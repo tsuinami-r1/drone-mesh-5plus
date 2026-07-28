@@ -1,4 +1,4 @@
-# <div align="center">  **Drone Remote ID Mapper** </div>
+# <div align="center">  **Remote Drone Mapper** </div>
 
 <div align="center">
 
@@ -7,7 +7,7 @@
 [![ESP32](https://img.shields.io/badge/ESP32-Compatible-green.svg)](https://www.espressif.com/)
 [![Flask](https://img.shields.io/badge/Flask-2.0+-red.svg)](https://flask.palletsprojects.com/)
 
-**A private, discreet, solar-powered counter-surveillance network for drone detection**
+**A private, discreet, solar-powered counter-surveillance network for drone detection.**
 
 Real-time Remote ID, DJI DroneID, MAVLink & analog-FPV mapping over a Meshtastic-linked mesh of unattended ESP32 nodes
 
