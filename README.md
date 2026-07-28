@@ -32,7 +32,7 @@ Original code by Luke Switzer and ColonelPanic. Currently prototyping RX5808 int
 
 ## 🛰️ **Intended use & deployment model**
 
-This is a **private, discreet counter-surveillance drone-detection network** — not a
+This is a **private, discreet counter-surveillance drone-detection network,** not a
 single sensor on a bench. The goal is persistent, low-profile awareness of drone
 activity over an area you care about (a property, a site, an event), built from a mesh
 of **unattended, self-powered field nodes**.
@@ -47,13 +47,13 @@ picture of who is flying and from where, without ever tipping them off.
 - **Distributed, receive-only nodes.** Each node is a XIAO ESP32 (S3 or C5) that
   *passively* listens for drone Remote ID, DJI DroneID, MAVLink, and analog FPV video.
   Nodes **transmit nothing over the air to detect a drone**, so the network itself
-  stays quiet, low-power, and hard to spot — discretion is a design property, not an
+  stays quiet, low-power, and hard to spot. Discretion is a design property, not an
   afterthought.
 - **Meshtastic backhaul — no infrastructure needed.** Each node pairs with a Heltec
   LoRa (Meshtastic) radio over UART. Detections travel home over the **encrypted LoRa
-  mesh** — no Wi-Fi, no cellular, no internet backhaul. This is what lets the network
+  mesh.** No Wi-Fi, no cellular, no internet backhaul. This is what lets the network
   blanket a wide area, including places with no power or connectivity.
-  Alternatively, if deployed on a rooftop - MQTT via the building's network is also possible.
+  Alternatively, if deployed on a rooftop, MQTT via the building's network is also possible.
 - **Remote, unattended, solar-powered.** Nodes run standalone in the field; the
   reference build is **solar powered**. There is no operator at the node — it wakes,
   listens, relays over the mesh, and keeps running. The firmware is hardened for
