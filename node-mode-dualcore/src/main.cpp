@@ -60,12 +60,17 @@ static SemaphoreHandle_t g_serial_mux = nullptr;
 
 // Hit-triggered dwell extension: a drone's message set (BasicID / Location /
 // System) spans several frames, so linger after a detection instead of hopping
-// away mid-set. Capped so one busy channel cannot starve the schedule.
+// away mid-set. Scaled to the dwell and kept small — the cap is spent PER
+// CHANNEL, so an oversized value multiplies across every busy channel and
+// stretches the whole cycle.
 // (Declared here because the WiFi callback below runs before channelHopTask.)
-#define CHANNEL_HOLD_MS      2000
-#define CHANNEL_HOLD_MAX_MS  3000
+#define CHANNEL_DWELL_MS     200   // cycle ≈ 800 ms; each secondary revisited ≈ 8 s
+#define CHANNEL_HOLD_MS      (CHANNEL_DWELL_MS * 6)   // 1200 ms
+#define CHANNEL_HOLD_MAX_MS  (CHANNEL_DWELL_MS * 8)   // 1600 ms
 
-static volatile uint32_t channel_hold_until = 0;   // millis() deadline; 0 = none
+// millis() deadline; a deadline in the past means "no hold" (never 0 — see
+// hop_to_channel()).
+static volatile uint32_t channel_hold_until = 0;
 
 // Called from the WiFi promiscuous callback on a parsed detection.
 static inline void note_wifi_detection() {
@@ -445,11 +450,20 @@ static const uint8_t primary_channels[]   = {1, 6, 11};
 static const uint8_t secondary_channels[] = {2, 3, 4, 5, 7, 8, 9, 10, 12, 13};
 #define NUM_PRIMARY_CHANNELS   (sizeof(primary_channels) / sizeof(primary_channels[0]))
 #define NUM_SECONDARY_CHANNELS (sizeof(secondary_channels) / sizeof(secondary_channels[0]))
-#define CHANNEL_DWELL_MS     200   // cycle ≈ 800 ms; each secondary revisited ≈ 8 s
+/* CHANNEL_DWELL_MS / CHANNEL_HOLD_* are defined near the top of this file,
+   above the WiFi callback that arms the hold. */
 
 static void hop_to_channel(uint8_t ch) {
-  esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
-  channel_hold_until = 0;            // fresh channel: no inherited hold
+  // A channel outside the configured regulatory domain is rejected; skip it
+  // rather than burning a dwell on the previous channel.
+  if (esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE) != ESP_OK) return;
+
+  // Fresh channel: never inherit the previous channel's hold. Use an
+  // already-past deadline rather than 0 — the 0 sentinel is NOT rollover-safe,
+  // since (int32_t)(0 - millis()) reads as "future" once uptime passes 24.9
+  // days, which would make every hop linger the full cap for half of each
+  // 49.7-day millis() cycle even with nothing detected.
+  channel_hold_until = millis() - 1;
   vTaskDelay(pdMS_TO_TICKS(CHANNEL_DWELL_MS));
 
   // Rollover-safe deadline compare: (int32_t)(deadline - now) > 0.
@@ -515,6 +529,18 @@ void setup() {
   // Initialize Wi-Fi
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
+
+  // Permit the full 1-13 range: the IDF default domain stops at channel 11 and
+  // esp_wifi_set_channel() silently rejects anything above it, which would drop
+  // channels 12/13 from the scan schedule. Receive-only, so no TX implications;
+  // set schan/nchan to match your regulatory domain (US: schan=1, nchan=11).
+  wifi_country_t ctry = {};
+  strcpy(ctry.cc, "HK");
+  ctry.schan = 1;
+  ctry.nchan = 13;
+  ctry.max_tx_power = 20;   // unused (receive-only) but must be valid
+  ctry.policy = WIFI_COUNTRY_POLICY_MANUAL;
+  esp_wifi_set_country(&ctry);
 
   esp_wifi_set_promiscuous(true);
   esp_wifi_set_promiscuous_rx_cb(&callback);

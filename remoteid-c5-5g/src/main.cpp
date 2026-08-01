@@ -82,11 +82,15 @@ static const uint8_t secondary_channels[] = {2, 3, 4, 5, 7, 8, 9, 10, 12, 13};
 
 // Hit-triggered dwell extension. A drone's message set (BasicID / Location /
 // System) arrives across several frames, so hopping away immediately after the
-// first hit costs a full cycle before the rest can be collected. After each
-// WiFi detection, linger on the current channel — capped so one busy channel
-// cannot starve the rest of the schedule.
-#define CHANNEL_HOLD_MS      2000
-#define CHANNEL_HOLD_MAX_MS  3000
+// first hit costs a full cycle before the rest can be collected.
+//
+// Scaled to the dwell so one definition suits both boards: the C5's fast
+// schedule returns to a channel every ~450 ms and needs only a short hold,
+// while the slower S3 schedule benefits from a longer one. Keep these small —
+// the cap is spent PER CHANNEL, so an oversized value multiplies across every
+// busy channel and would starve the 5 GHz revisit rate.
+#define CHANNEL_HOLD_MS      (DWELL_TIME_MS * 6)   // C5 300 ms / S3 1200 ms
+#define CHANNEL_HOLD_MAX_MS  (DWELL_TIME_MS * 8)   // C5 400 ms / S3 1600 ms
 
 // ============================================================================
 // WiFi Band Enum
@@ -145,7 +149,8 @@ volatile uint8_t current_channel = 6;  /* channelHopTask updates this */
 volatile WiFiBand current_band = BAND_2_4GHZ;
 static portMUX_TYPE channelMux = portMUX_INITIALIZER_UNLOCKED;
 
-// millis() deadline for the hit-triggered dwell extension; 0 = no hold.
+// millis() deadline for the hit-triggered dwell extension. A deadline in the
+// past means "no hold" — never use 0 as the sentinel, see hop_to_channel().
 static volatile uint32_t channel_hold_until = 0;
 
 // Called from the WiFi promiscuous callback on a parsed detection so the hop
@@ -397,14 +402,22 @@ void print_compact_message(const id_data *UAV) {
 static void hop_to_channel(uint8_t ch) {
   WiFiBand band = (ch > 20) ? BAND_5GHZ : BAND_2_4GHZ;
 
-  esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
+  // A channel outside the configured regulatory domain is rejected; skip it
+  // rather than burning a dwell on the previous channel and then mislabelling
+  // the detections it yields.
+  if (esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE) != ESP_OK) return;
+
   portENTER_CRITICAL(&channelMux);
   current_channel = ch;
   current_band = band;
   portEXIT_CRITICAL(&channelMux);
 
-  // Fresh channel: never inherit the previous channel's hold.
-  channel_hold_until = 0;
+  // Fresh channel: never inherit the previous channel's hold. Use an
+  // already-past deadline rather than 0 — the 0 sentinel is NOT rollover-safe,
+  // since (int32_t)(0 - millis()) reads as "future" once uptime passes 24.9
+  // days, which would make every hop linger the full cap for half of each
+  // 49.7-day millis() cycle even with nothing detected.
+  channel_hold_until = millis() - 1;
   vTaskDelay(pdMS_TO_TICKS(DWELL_TIME_MS));
 
   // Rollover-safe deadline compare: (int32_t)(deadline - now) > 0.
@@ -651,6 +664,19 @@ void setup() {
   // WiFi promiscuous mode
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
+
+  // Permit the full 1-13 range: the IDF default domain stops at channel 11, and
+  // esp_wifi_set_channel() silently rejects anything above it, which would drop
+  // channels 12/13 from the scan schedule. Receive-only, so no TX implications;
+  // set schan/nchan to match your regulatory domain (US: schan=1, nchan=11).
+  wifi_country_t ctry = {};
+  strcpy(ctry.cc, "HK");
+  ctry.schan = 1;
+  ctry.nchan = 13;
+  ctry.max_tx_power = 20;   // unused (receive-only) but must be valid
+  ctry.policy = WIFI_COUNTRY_POLICY_MANUAL;
+  esp_wifi_set_country(&ctry);
+
   esp_wifi_set_promiscuous(true);
   esp_wifi_set_promiscuous_rx_cb(&callback);
   esp_wifi_set_channel(6, WIFI_SECOND_CHAN_NONE);  /* initial; channelHopTask takes over */
