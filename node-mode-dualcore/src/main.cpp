@@ -58,6 +58,20 @@ unsigned long last_status = 0;
 static SemaphoreHandle_t g_uav_mux    = nullptr;
 static SemaphoreHandle_t g_serial_mux = nullptr;
 
+// Hit-triggered dwell extension: a drone's message set (BasicID / Location /
+// System) spans several frames, so linger after a detection instead of hopping
+// away mid-set. Capped so one busy channel cannot starve the schedule.
+// (Declared here because the WiFi callback below runs before channelHopTask.)
+#define CHANNEL_HOLD_MS      2000
+#define CHANNEL_HOLD_MAX_MS  3000
+
+static volatile uint32_t channel_hold_until = 0;   // millis() deadline; 0 = none
+
+// Called from the WiFi promiscuous callback on a parsed detection.
+static inline void note_wifi_detection() {
+  channel_hold_until = millis() + CHANNEL_HOLD_MS;
+}
+
 // Forward declarations
 void callback(void *, wifi_promiscuous_pkt_type_t);
 void send_json_fast(const uav_data *UAV);
@@ -243,6 +257,7 @@ void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
     uint8_t mav_mac[6];
     mav_gps_t mav_gps;
     if (mav_wifi_extract(payload, length, mav_mac, &mav_gps)) {
+      note_wifi_detection();   // linger for the rest of this drone's message set
       xSemaphoreTake(g_uav_mux, portMAX_DELAY);
       uav_data *UAV = next_uav(mav_mac);
       memcpy(UAV->mac, mav_mac, 6);
@@ -266,6 +281,7 @@ void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
        real buffer, not nullptr (UAV.mac is re-derived from &payload[10] below). */
     uint8_t nan_src[6];
     if (odid_wifi_receive_message_pack_nan_action_frame(&UAS_data, (char *)nan_src, payload, length) == 0) {
+      note_wifi_detection();   // linger for the rest of this drone's message set
       uav_data UAV;
       memset(&UAV, 0, sizeof(UAV));
       memcpy(UAV.mac, &payload[10], 6);
@@ -312,6 +328,7 @@ void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
           uint8_t src_mac[6];
           memcpy(src_mac, &payload[10], 6);
           if (dji_parse_droneid(&payload[offset + 5], len - 3, &dji)) {
+            note_wifi_detection();
             char djijson[384];
             dji_emit_json(src_mac, packet->rx_ctrl.rssi, &dji, djijson, sizeof(djijson));
             serial_println_locked(djijson);
@@ -340,6 +357,7 @@ void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
              vendor-type header), not the rest of the frame, so a truncated IE
              cannot make the decoder consume following IEs as ODID messages. */
           if (len >= 6 && j < length) {
+            note_wifi_detection();
             int pack_len = len - 5;
             memset(&UAS_data, 0, sizeof(UAS_data));
             odid_message_process_pack(&UAS_data, &payload[j], pack_len);
@@ -416,14 +434,41 @@ void bleScanTask(void *parameter) {
   }
 }
 
-static const uint8_t channels_2_4ghz[] = {1, 6, 11};
+// ---------------------------------------------------------------------------
+// Channel scan schedule
+// ---------------------------------------------------------------------------
+// Two-tier: every primary channel is visited each cycle, plus ONE secondary
+// sampled round-robin. Scanning only 1/6/11 left 10 of the 13 permitted
+// 2.4 GHz channels permanently unscanned — drones pick channels dynamically
+// and are not bound to the consumer 1/6/11 convention.
+static const uint8_t primary_channels[]   = {1, 6, 11};
+static const uint8_t secondary_channels[] = {2, 3, 4, 5, 7, 8, 9, 10, 12, 13};
+#define NUM_PRIMARY_CHANNELS   (sizeof(primary_channels) / sizeof(primary_channels[0]))
+#define NUM_SECONDARY_CHANNELS (sizeof(secondary_channels) / sizeof(secondary_channels[0]))
+#define CHANNEL_DWELL_MS     200   // cycle ≈ 800 ms; each secondary revisited ≈ 8 s
+
+static void hop_to_channel(uint8_t ch) {
+  esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
+  channel_hold_until = 0;            // fresh channel: no inherited hold
+  vTaskDelay(pdMS_TO_TICKS(CHANNEL_DWELL_MS));
+
+  // Rollover-safe deadline compare: (int32_t)(deadline - now) > 0.
+  uint32_t linger_start = millis();
+  while ((int32_t)(channel_hold_until - millis()) > 0 &&
+         (millis() - linger_start) < CHANNEL_HOLD_MAX_MS) {
+    vTaskDelay(pdMS_TO_TICKS(20));
+  }
+}
 
 void channelHopTask(void *parameter) {
-  uint8_t idx = 0;
+  uint8_t sec = 0;
   for (;;) {
-    esp_wifi_set_channel(channels_2_4ghz[idx], WIFI_SECOND_CHAN_NONE);
-    idx = (idx + 1) % (sizeof(channels_2_4ghz) / sizeof(channels_2_4ghz[0]));
-    vTaskDelay(pdMS_TO_TICKS(200));
+    for (unsigned i = 0; i < NUM_PRIMARY_CHANNELS; i++)
+      hop_to_channel(primary_channels[i]);
+
+    // One secondary channel per cycle, round-robin over the full band.
+    hop_to_channel(secondary_channels[sec]);
+    sec = (sec + 1) % NUM_SECONDARY_CHANNELS;
   }
 }
 
