@@ -80,7 +80,47 @@ detection nodes simultaneously, each named to match its paired Meshtastic node.
 
 > **DJI Wi-Fi coverage caveat:** Modern DJI aircraft (Mini 3 Pro, Air 3, Mavic 3 series) primarily use OcuSync/O3/O4 for their DroneID downlink, which is OFDM in the video band and **cannot be demodulated by an ESP32**. The Wi-Fi IE221 DroneID broadcast (`26:37:12`) is present on older and budget models; treat it as partial fleet coverage, not "all DJI".
 
-> **MAVLink Wi-Fi coverage caveat:** Only detects ArduPilot/PX4 aircraft that broadcast unencrypted MAVLink telemetry over an open Wi-Fi AP (UDP port 14550). DJI and other consumer drones do not use MAVLink. The ESP32 monitors one channel at a time (default: channel 6); aircraft on other channels are missed.
+> **MAVLink Wi-Fi coverage caveat:** Only detects ArduPilot/PX4 aircraft that broadcast unencrypted MAVLink telemetry over an open Wi-Fi AP (UDP port 14550). DJI and other consumer drones do not use MAVLink. The ESP32 listens on one channel at a time, but hops the full band (see [Channel scanning](#-channel-scanning)), so aircraft are found within one sweep rather than only on a fixed channel.
+
+---
+
+## 📡 **Channel scanning**
+
+A Wi-Fi radio hears one channel at a time, so *which* channels get scanned, and how
+often each is revisited, sets the real detection coverage.
+
+### Two-tier schedule
+
+Scanning only the consumer 1/6/11 convention leaves 10 of the 13 permitted 2.4 GHz
+channels unscanned — drones pick channels dynamically and are not bound to it. But
+sweeping all 13 at equal dwell pushes the revisit interval to ~2.6 s, too slow to
+assemble a full OpenDroneID message set (BasicID / Location / System arrive in
+separate frames).
+
+So each cycle visits **every primary channel plus one secondary**, round-robin:
+
+| Board | Primary (every cycle) | Secondary (one per cycle) | Dwell | Cycle | Secondary revisit |
+|---|---|---|---|---|---|
+| XIAO ESP32-S3 | 1, 6, 11 | 2–5, 7–10, 12, 13 | 200 ms | ~800 ms | ~8 s |
+| XIAO ESP32-C5 | 1, 6, 11 + 149–165 (UNII-3) | 2–5, 7–10, 12, 13 | 50 ms | ~450 ms | ~4.5 s |
+
+Common channels keep a sub-second revisit; every other channel is still swept within
+a few seconds instead of never.
+
+### Adaptive dwell
+
+After a **confirmed detection** (not ordinary Wi-Fi traffic), the node lingers on that
+channel so the rest of the drone's message set can be collected before hopping away —
+`CHANNEL_HOLD_MS`, scaled to the dwell (C5 300 ms, S3 1200 ms) and hard-capped by
+`CHANNEL_HOLD_MAX_MS` so one busy channel cannot starve the schedule. Fast-revisit
+boards need less hold because they come back sooner.
+
+### Regulatory domain
+
+The firmware sets the Wi-Fi country to permit **channels 1–13**; the ESP-IDF default
+stops at 11 and silently rejects anything above it. Nodes are receive-only, so this has
+no transmit implications — but set `schan`/`nchan` in `setup()` to match your
+jurisdiction (US: `schan=1, nchan=11`).
 
 ---
 
@@ -426,7 +466,10 @@ MAVLink detections emit the same schema as OpenDroneID, with `basic_id` set to `
 
 ### Limitation
 
-The ESP32 monitors one Wi-Fi channel at a time (channel 6 by default). Aircraft broadcasting on a different channel are not detected.
+The ESP32 listens on one Wi-Fi channel at a time, but the scan schedule sweeps the
+whole 2.4 GHz band (plus 5 GHz UNII-3 on the C5), so an aircraft on any channel is
+picked up within one sweep. See [Channel scanning](#-channel-scanning) for the
+revisit intervals.
 
 ---
 
@@ -695,7 +738,7 @@ tail -f mesh-mapper.log
 
 **No Drone Detections**
 - Verify ESP32 firmware is properly flashed
-- Check WiFi channel configuration (default: channel 6)
+- Check the scan schedule in `channelHopTask` (see [Channel scanning](#-channel-scanning))
 - Ensure drones are transmitting Remote ID (required in many jurisdictions)
 
 ---

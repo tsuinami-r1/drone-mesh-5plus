@@ -5,8 +5,9 @@
  * promiscuous mode.  Parses IPv4/UDP/MAVLink v1+v2, handles QoS and from-DS
  * addressing.  WPA/WEP-protected frames are silently skipped.
  *
- * Limitation: only detects drones on the channel the ESP32 is currently
- * scanning (channel 6 by default).  Drones on other channels are missed.
+ * Limitation: only detects drones on the channel the ESP32 is currently tuned
+ * to.  channelHopTask sweeps the full band, so a drone is picked up within one
+ * sweep rather than only on a fixed channel.
  */
 
 #include <stdint.h>
