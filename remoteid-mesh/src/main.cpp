@@ -180,14 +180,66 @@ void bleScanTask(void *parameter) {
   }
 }
 
-static const uint8_t channels_2_4ghz[] = {1, 6, 11};
+// ---------------------------------------------------------------------------
+// Channel scan schedule
+// ---------------------------------------------------------------------------
+// Two-tier: every primary channel is visited each cycle, plus ONE secondary
+// sampled round-robin. Scanning only 1/6/11 left 10 of the 13 permitted
+// 2.4 GHz channels permanently unscanned — drones pick channels dynamically
+// and are not bound to the consumer 1/6/11 convention.
+static const uint8_t primary_channels[]   = {1, 6, 11};
+static const uint8_t secondary_channels[] = {2, 3, 4, 5, 7, 8, 9, 10, 12, 13};
+#define NUM_PRIMARY_CHANNELS   (sizeof(primary_channels) / sizeof(primary_channels[0]))
+#define NUM_SECONDARY_CHANNELS (sizeof(secondary_channels) / sizeof(secondary_channels[0]))
+#define CHANNEL_DWELL_MS     200   // cycle ≈ 800 ms; each secondary revisited ≈ 8 s
+
+// Hit-triggered dwell extension: a drone's message set (BasicID / Location /
+// System) spans several frames, so linger after a detection instead of hopping
+// away mid-set. Scaled to the dwell and kept small — the cap is spent PER
+// CHANNEL, so an oversized value multiplies across every busy channel and
+// stretches the whole cycle.
+#define CHANNEL_HOLD_MS      (CHANNEL_DWELL_MS * 6)   // 1200 ms
+#define CHANNEL_HOLD_MAX_MS  (CHANNEL_DWELL_MS * 8)   // 1600 ms
+
+// millis() deadline; a deadline in the past means "no hold" (never 0 — see
+// hop_to_channel()).
+static volatile uint32_t channel_hold_until = 0;
+
+// Called from the WiFi promiscuous callback on a parsed detection.
+static inline void note_wifi_detection() {
+  channel_hold_until = millis() + CHANNEL_HOLD_MS;
+}
+
+static void hop_to_channel(uint8_t ch) {
+  // A channel outside the configured regulatory domain is rejected; skip it
+  // rather than burning a dwell on the previous channel.
+  if (esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE) != ESP_OK) return;
+
+  // Fresh channel: never inherit the previous channel's hold. Use an
+  // already-past deadline rather than 0 — the 0 sentinel is NOT rollover-safe,
+  // since (int32_t)(0 - millis()) reads as "future" once uptime passes 24.9
+  // days, which would make every hop linger the full cap for half of each
+  // 49.7-day millis() cycle even with nothing detected.
+  channel_hold_until = millis() - 1;
+  vTaskDelay(pdMS_TO_TICKS(CHANNEL_DWELL_MS));
+
+  // Rollover-safe deadline compare: (int32_t)(deadline - now) > 0.
+  uint32_t linger_start = millis();
+  while ((int32_t)(channel_hold_until - millis()) > 0 &&
+         (millis() - linger_start) < CHANNEL_HOLD_MAX_MS) {
+    vTaskDelay(pdMS_TO_TICKS(20));
+  }
+}
 
 void channelHopTask(void *parameter) {
-  uint8_t idx = 0;
+  uint8_t sec = 0;
   for (;;) {
-    esp_wifi_set_channel(channels_2_4ghz[idx], WIFI_SECOND_CHAN_NONE);
-    idx = (idx + 1) % (sizeof(channels_2_4ghz) / sizeof(channels_2_4ghz[0]));
-    vTaskDelay(pdMS_TO_TICKS(200));
+    for (unsigned i = 0; i < NUM_PRIMARY_CHANNELS; i++)
+      hop_to_channel(primary_channels[i]);
+
+    // One secondary channel per cycle, round-robin over the full band.
+    hop_to_channel(secondary_channels[sec]);
+    sec = (sec + 1) % NUM_SECONDARY_CHANNELS;
   }
 }
 
@@ -213,6 +265,18 @@ void setup() {
   esp_wifi_set_mode(WIFI_MODE_NULL);
   esp_wifi_start();
   g_serial_mux = xSemaphoreCreateMutex();
+
+  // Permit the full 1-13 range: the IDF default domain stops at channel 11 and
+  // esp_wifi_set_channel() silently rejects anything above it, which would drop
+  // channels 12/13 from the scan schedule. Receive-only, so no TX implications;
+  // set schan/nchan to match your regulatory domain (US: schan=1, nchan=11).
+  wifi_country_t ctry = {};
+  strcpy(ctry.cc, "HK");
+  ctry.schan = 1;
+  ctry.nchan = 13;
+  ctry.max_tx_power = 20;   // unused (receive-only) but must be valid
+  ctry.policy = WIFI_COUNTRY_POLICY_MANUAL;
+  esp_wifi_set_country(&ctry);
 
   esp_wifi_set_promiscuous(true);
   esp_wifi_set_promiscuous_rx_cb(&callback);
@@ -299,6 +363,7 @@ void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
     uint8_t mav_mac[6];
     mav_gps_t mav_gps;
     if (mav_wifi_extract(payload, length, mav_mac, &mav_gps)) {
+      note_wifi_detection();
       uav_data UAV = {};
       memcpy(UAV.mac, mav_mac, 6);
       UAV.rssi = packet->rx_ctrl.rssi;
@@ -324,6 +389,7 @@ void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
     if (odid_wifi_receive_message_pack_nan_action_frame(&UAS_data,
                                                           (char *)UAV.op_id,
                                                           payload, length) == 0) {
+      note_wifi_detection();
       parse_odid(&UAV, &UAS_data);
       print_compact_message(&UAV);
       send_json_fast(&UAV);         // Send JSON messages as fast as possible.
@@ -341,6 +407,7 @@ void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
         if (dji_is_oui(&payload[offset+2])) {
           dji_droneid_t dji;
           if (dji_parse_droneid(&payload[offset + 5], len - 3, &dji)) {
+            note_wifi_detection();
             char djijson[384];
             dji_emit_json(UAV.mac, UAV.rssi, &dji, djijson, sizeof(djijson));
             serial_println_locked(djijson);
@@ -369,6 +436,7 @@ void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
           /* Bound the ODID pack to this IE's body (len - 5), not the rest of the
              frame, so a truncated IE cannot consume following IEs. */
           if (len >= 6 && j < length) {
+            note_wifi_detection();
             int pack_len = len - 5;
             memset(&UAS_data, 0, sizeof(UAS_data));
             odid_message_process_pack(&UAS_data, &payload[j], pack_len);

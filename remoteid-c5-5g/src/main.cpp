@@ -58,16 +58,39 @@ const int SERIAL1_RX_PIN = 6;   // GPIO6 → Heltec TX
 #endif
 
 // ============================================================================
-// Dual-Band Channel Configuration
+// Channel Scan Schedule
 // ============================================================================
 
-// All channels to scan: 2.4 GHz primary (1/6/11) + 5 GHz UNII-3 (149–165)
-// Dwell 50 ms each → full cycle ≈ 400 ms, revisiting each 2.4 GHz channel ~2.5×/s
-static const uint8_t all_channels[] = {1, 6, 11, 149, 153, 157, 161, 165};
-#define NUM_ALL_CHANNELS (sizeof(all_channels) / sizeof(all_channels[0]))
+// Two-tier schedule: every primary channel is visited each cycle, plus ONE
+// secondary channel sampled round-robin. Scanning only 1/6/11 leaves 10 of the
+// 13 permitted 2.4 GHz channels permanently unscanned — drones pick channels
+// dynamically and are not bound to the consumer 1/6/11 convention. Tiering adds
+// full-band coverage while keeping a fast revisit on the common channels.
+#if BOARD_IS_C5
+  // Dual-band: 2.4 GHz primaries + 5 GHz UNII-3
+  static const uint8_t primary_channels[] = {1, 6, 11, 149, 153, 157, 161, 165};
+  #define DWELL_TIME_MS 50    // cycle ≈ 450 ms; each secondary revisited ≈ 4.5 s
+#else
+  // S3 is 2.4 GHz only
+  static const uint8_t primary_channels[] = {1, 6, 11};
+  #define DWELL_TIME_MS 200   // cycle ≈ 800 ms; each secondary revisited ≈ 8 s
+#endif
+static const uint8_t secondary_channels[] = {2, 3, 4, 5, 7, 8, 9, 10, 12, 13};
 
-// Kept for reference by Serial printf in channelHopTask
-#define DWELL_TIME_MS 50
+#define NUM_PRIMARY_CHANNELS   (sizeof(primary_channels) / sizeof(primary_channels[0]))
+#define NUM_SECONDARY_CHANNELS (sizeof(secondary_channels) / sizeof(secondary_channels[0]))
+
+// Hit-triggered dwell extension. A drone's message set (BasicID / Location /
+// System) arrives across several frames, so hopping away immediately after the
+// first hit costs a full cycle before the rest can be collected.
+//
+// Scaled to the dwell so one definition suits both boards: the C5's fast
+// schedule returns to a channel every ~450 ms and needs only a short hold,
+// while the slower S3 schedule benefits from a longer one. Keep these small —
+// the cap is spent PER CHANNEL, so an oversized value multiplies across every
+// busy channel and would starve the 5 GHz revisit rate.
+#define CHANNEL_HOLD_MS      (DWELL_TIME_MS * 6)   // C5 300 ms / S3 1200 ms
+#define CHANNEL_HOLD_MAX_MS  (DWELL_TIME_MS * 8)   // C5 400 ms / S3 1600 ms
 
 // ============================================================================
 // WiFi Band Enum
@@ -121,10 +144,20 @@ NimBLEScan* pBLEScan = nullptr;
 ODID_UAS_Data UAS_data;
 unsigned long last_status = 0;
 
-// Current channel tracking (for dual-band)
+// Current channel tracking (updated by channelHopTask on both board targets)
 volatile uint8_t current_channel = 6;  /* channelHopTask updates this */
 volatile WiFiBand current_band = BAND_2_4GHZ;
 static portMUX_TYPE channelMux = portMUX_INITIALIZER_UNLOCKED;
+
+// millis() deadline for the hit-triggered dwell extension. A deadline in the
+// past means "no hold" — never use 0 as the sentinel, see hop_to_channel().
+static volatile uint32_t channel_hold_until = 0;
+
+// Called from the WiFi promiscuous callback on a parsed detection so the hop
+// task lingers here instead of moving on mid-message-set.
+static inline void note_wifi_detection() {
+  channel_hold_until = millis() + CHANNEL_HOLD_MS;
+}
 
 static QueueHandle_t printQueue;
 
@@ -362,33 +395,54 @@ void print_compact_message(const id_data *UAV) {
 }
 
 // ============================================================================
-// Channel Hopping Task (C5 dual-band only)
+// Channel Hopping Task (both board targets)
 // ============================================================================
 
-#if DUAL_BAND_ENABLED
-void channelHopTask(void *parameter) {
-  Serial.println("[DUAL-BAND] Channel hopping active");
-  Serial.print("[DUAL-BAND] Channels: ");
-  for (int i = 0; i < (int)NUM_ALL_CHANNELS; i++) {
-    Serial.printf("%d%s", all_channels[i], (i < (int)NUM_ALL_CHANNELS - 1) ? "," : "\n");
-  }
+// Tune to a channel, dwell, then linger while detections keep arriving here.
+static void hop_to_channel(uint8_t ch) {
+  WiFiBand band = (ch > 20) ? BAND_5GHZ : BAND_2_4GHZ;
 
-  uint8_t idx = 0;
-  for (;;) {
-    uint8_t ch = all_channels[idx];
-    WiFiBand band = (ch > 20) ? BAND_5GHZ : BAND_2_4GHZ;
+  // A channel outside the configured regulatory domain is rejected; skip it
+  // rather than burning a dwell on the previous channel and then mislabelling
+  // the detections it yields.
+  if (esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE) != ESP_OK) return;
 
-    portENTER_CRITICAL(&channelMux);
-    current_channel = ch;
-    current_band = band;
-    portEXIT_CRITICAL(&channelMux);
+  portENTER_CRITICAL(&channelMux);
+  current_channel = ch;
+  current_band = band;
+  portEXIT_CRITICAL(&channelMux);
 
-    esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
-    idx = (idx + 1) % NUM_ALL_CHANNELS;
-    vTaskDelay(pdMS_TO_TICKS(DWELL_TIME_MS));
+  // Fresh channel: never inherit the previous channel's hold. Use an
+  // already-past deadline rather than 0 — the 0 sentinel is NOT rollover-safe,
+  // since (int32_t)(0 - millis()) reads as "future" once uptime passes 24.9
+  // days, which would make every hop linger the full cap for half of each
+  // 49.7-day millis() cycle even with nothing detected.
+  channel_hold_until = millis() - 1;
+  vTaskDelay(pdMS_TO_TICKS(DWELL_TIME_MS));
+
+  // Rollover-safe deadline compare: (int32_t)(deadline - now) > 0.
+  uint32_t linger_start = millis();
+  while ((int32_t)(channel_hold_until - millis()) > 0 &&
+         (millis() - linger_start) < CHANNEL_HOLD_MAX_MS) {
+    vTaskDelay(pdMS_TO_TICKS(20));
   }
 }
-#endif
+
+void channelHopTask(void *parameter) {
+  Serial.printf("[SCAN] Channel hopping: %u primary + %u secondary, dwell %d ms\n",
+                (unsigned)NUM_PRIMARY_CHANNELS, (unsigned)NUM_SECONDARY_CHANNELS,
+                DWELL_TIME_MS);
+
+  uint8_t sec = 0;
+  for (;;) {
+    for (unsigned i = 0; i < NUM_PRIMARY_CHANNELS; i++)
+      hop_to_channel(primary_channels[i]);
+
+    // One secondary channel per cycle, round-robin over the full band.
+    hop_to_channel(secondary_channels[sec]);
+    sec = (sec + 1) % NUM_SECONDARY_CHANNELS;
+  }
+}
 
 // ============================================================================
 // BLE Scan Task
@@ -427,6 +481,7 @@ static void processODIDData(id_data* UAV) {
 }
 
 static void storeAndQueue(id_data* UAV) {
+  note_wifi_detection();   // linger on this channel for the rest of the message set
   xSemaphoreTake(g_uav_mux, portMAX_DELAY);
   id_data* storedUAV = next_uav(UAV->mac);
   *storedUAV = *UAV;
@@ -507,6 +562,7 @@ void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
           memcpy(src_mac, &payload[10], 6);
           if (dji_parse_droneid(&payload[offset + 5], len - 3, &dji)) {
             char djijson[384];
+            note_wifi_detection();   // DJI bypasses storeAndQueue — hold here too
             dji_emit_json(src_mac, packet->rx_ctrl.rssi, &dji, djijson, sizeof(djijson));
             serial_println_locked(djijson);
             /* Full JSON (~300 B) exceeds Meshtastic MTU (~228 B); send compact relay instead */
@@ -608,14 +664,27 @@ void setup() {
   // WiFi promiscuous mode
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
+
+  // Permit the full 1-13 range: the IDF default domain stops at channel 11, and
+  // esp_wifi_set_channel() silently rejects anything above it, which would drop
+  // channels 12/13 from the scan schedule. Receive-only, so no TX implications;
+  // set schan/nchan to match your regulatory domain (US: schan=1, nchan=11).
+  wifi_country_t ctry = {};
+  strcpy(ctry.cc, "HK");
+  ctry.schan = 1;
+  ctry.nchan = 13;
+  ctry.max_tx_power = 20;   // unused (receive-only) but must be valid
+  ctry.policy = WIFI_COUNTRY_POLICY_MANUAL;
+  esp_wifi_set_country(&ctry);
+
   esp_wifi_set_promiscuous(true);
   esp_wifi_set_promiscuous_rx_cb(&callback);
   esp_wifi_set_channel(6, WIFI_SECOND_CHAN_NONE);  /* initial; channelHopTask takes over */
 
 #if DUAL_BAND_ENABLED
-  Serial.println("WiFi promiscuous mode (2.4GHz ch1/6/11 + 5GHz ch149-165, hopping enabled)");
+  Serial.println("WiFi promiscuous mode (2.4GHz ch1-13 + 5GHz ch149-165, hopping enabled)");
 #else
-  Serial.println("WiFi promiscuous mode (fixed ch6)");
+  Serial.println("WiFi promiscuous mode (2.4GHz ch1-13, hopping enabled)");
 #endif
 
   // BLE init (NimBLE 2.1.0)
@@ -634,12 +703,12 @@ void setup() {
 #if SINGLE_CORE
   xTaskCreate(bleScanTask, "BLEScanTask", 10000, NULL, 1, NULL);
   xTaskCreate(printerTask, "PrinterTask", 10000, NULL, 1, NULL);
-  #if DUAL_BAND_ENABLED
   xTaskCreate(channelHopTask, "ChannelHopTask", 4096, NULL, 2, NULL);
-  #endif
 #else
   xTaskCreatePinnedToCore(bleScanTask, "BLEScanTask", 10000, NULL, 1, NULL, 1);
   xTaskCreatePinnedToCore(printerTask, "PrinterTask", 10000, NULL, 1, NULL, 1);
+  // S3 hops too — previously it sat on channel 6 for the life of the node.
+  xTaskCreatePinnedToCore(channelHopTask, "ChannelHopTask", 4096, NULL, 2, NULL, 0);
 #endif
 
   memset(uavs, 0, sizeof(uavs));
