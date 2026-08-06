@@ -28,6 +28,21 @@
 const int SERIAL1_RX_PIN = 7;  // GPIO7
 const int SERIAL1_TX_PIN = 6;  // GPIO6
 
+// ---------------------------------------------------------------------------
+// Regulatory domain — set to match the deployment jurisdiction
+// ---------------------------------------------------------------------------
+// Bounds which channels esp_wifi_set_channel() accepts, and therefore which
+// channels the scan schedule can actually reach. Nodes are receive-only, so
+// this carries no transmit implications.
+//   US / FCC       : start 1, count 11
+//   EU / HK / ETSI : start 1, count 13   <- default
+//   Japan          : start 1, count 14   (ch 14 is 802.11b DSSS only)
+// Prefer over-declaring: a channel the hardware refuses is skipped harmlessly
+// (and logged), but a channel excluded here is never scanned at all.
+#define WIFI_COUNTRY_CC   "HK"
+#define WIFI_CHAN_START   1
+#define WIFI_CHAN_COUNT   13
+
 ODID_UAS_Data UAS_data;
 
 // Structure to hold UAV detection data
@@ -212,8 +227,21 @@ static inline void note_wifi_detection() {
 
 static void hop_to_channel(uint8_t ch) {
   // A channel outside the configured regulatory domain is rejected; skip it
-  // rather than burning a dwell on the previous channel.
-  if (esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE) != ESP_OK) return;
+  // rather than burning a dwell on the previous channel and then mislabelling
+  // the detections it yields. Warn a bounded number of times so a mis-set
+  // domain is visible in the log instead of silently shrinking coverage.
+  if (esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE) != ESP_OK) {
+    static uint8_t warn_budget = 8;
+    if (warn_budget) {
+      warn_budget--;
+      char w[104];
+      snprintf(w, sizeof(w),
+               "[SCAN] channel %u rejected by regulatory domain "
+               "- check WIFI_CHAN_START/WIFI_CHAN_COUNT", (unsigned)ch);
+      serial_println_locked(w);
+    }
+    return;
+  }
 
   // Fresh channel: never inherit the previous channel's hold. Use an
   // already-past deadline rather than 0 — the 0 sentinel is NOT rollover-safe,
@@ -266,14 +294,13 @@ void setup() {
   esp_wifi_start();
   g_serial_mux = xSemaphoreCreateMutex();
 
-  // Permit the full 1-13 range: the IDF default domain stops at channel 11 and
-  // esp_wifi_set_channel() silently rejects anything above it, which would drop
-  // channels 12/13 from the scan schedule. Receive-only, so no TX implications;
-  // set schan/nchan to match your regulatory domain (US: schan=1, nchan=11).
+  // Regulatory domain — configured via WIFI_CHAN_* at the top of this file.
+  // The IDF default domain stops at channel 11 and esp_wifi_set_channel()
+  // rejects anything above it, which would drop 12/13 from the schedule.
   wifi_country_t ctry = {};
-  strcpy(ctry.cc, "HK");
-  ctry.schan = 1;
-  ctry.nchan = 13;
+  strcpy(ctry.cc, WIFI_COUNTRY_CC);
+  ctry.schan = WIFI_CHAN_START;
+  ctry.nchan = WIFI_CHAN_COUNT;
   ctry.max_tx_power = 20;   // unused (receive-only) but must be valid
   ctry.policy = WIFI_COUNTRY_POLICY_MANUAL;
   esp_wifi_set_country(&ctry);
