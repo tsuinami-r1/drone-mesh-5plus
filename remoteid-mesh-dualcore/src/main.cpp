@@ -1,7 +1,6 @@
-#if !defined(CONFIG_IDF_TARGET_ESP32S3)
-  /* Tasks are pinned to core 1, so this firmware needs the dual-core ESP32-S3.
-     A single-core target (e.g. C6) would abort in xTaskCreatePinnedToCore. */
-  #error "This program requires a dual-core ESP32-S3"
+/* ARDUINO_ARCH_ESP32 is a -D build flag, so it is usable before any include. */
+#if !defined(ARDUINO_ARCH_ESP32)
+  #error "This program requires an ESP32"
 #endif
 
 #include <Arduino.h>
@@ -22,6 +21,15 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/semphr.h>
+
+/* Tasks are pinned to core 1, so this firmware needs the dual-core ESP32-S3;
+   a single-core target (e.g. C6) would abort in xTaskCreatePinnedToCore.
+   This check MUST come after the includes — CONFIG_IDF_TARGET_* is defined in
+   sdkconfig.h, which Arduino.h pulls in, so before that it is always undefined
+   and the guard would fire on every target. */
+#if !defined(CONFIG_IDF_TARGET_ESP32S3)
+  #error "This program requires a dual-core ESP32-S3"
+#endif
 
 const int SERIAL1_RX_PIN = 6;
 const int SERIAL1_TX_PIN = 5;
