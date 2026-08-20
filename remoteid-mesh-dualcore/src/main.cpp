@@ -212,15 +212,15 @@ void print_compact_message(const id_data *UAV) {
   static unsigned long lastSendTime = 0;
   const unsigned long sendInterval = 5000;
   const int MAX_MESH_SIZE = 230;
-  
+
   if (millis() - lastSendTime < sendInterval) return;
   lastSendTime = millis();
-  
+
   char mac_str[18];
   snprintf(mac_str, sizeof(mac_str), "%02x:%02x:%02x:%02x:%02x:%02x",
            UAV->mac[0], UAV->mac[1], UAV->mac[2],
            UAV->mac[3], UAV->mac[4], UAV->mac[5]);
-  
+
   char mesh_msg[MAX_MESH_SIZE];
   int msg_len = 0;
   msg_len += snprintf(mesh_msg + msg_len, sizeof(mesh_msg) - msg_len,
@@ -375,7 +375,7 @@ void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
       memcpy(UAV.mac, &payload[10], 6);
       UAV.rssi = packet->rx_ctrl.rssi;
       UAV.last_seen = millis();
-      
+
       if (UAS_data.BasicIDValid[0]) {
         strncpy(UAV.uav_id, (char *)UAS_data.BasicID[0].UASID, ODID_ID_SIZE);
         UAV.uav_id[ODID_ID_SIZE] = '\0';
@@ -395,7 +395,7 @@ void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
       if (UAS_data.OperatorIDValid) {
         strncpy(UAV.op_id, (char *)UAS_data.OperatorID.OperatorId, ODID_ID_SIZE);
       }
-      
+
       storeAndQueue(&UAV);
     }
   }

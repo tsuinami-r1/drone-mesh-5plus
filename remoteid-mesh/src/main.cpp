@@ -1,5 +1,3 @@
-
-
 /* Minimal scanner for WiFi direct remote ID */
 
 #if !defined(ARDUINO_ARCH_ESP32)
@@ -89,7 +87,6 @@ struct uav_data {
 };
 
 // Forward declarations
-void event_handler(void *ctx, esp_event_base_t event_base, int32_t event_id, void *event_data);
 void callback(void *, wifi_promiscuous_pkt_type_t);
 void parse_odid(struct uav_data *, ODID_UAS_Data *);
 void store_mac(struct uav_data *uav, uint8_t *payload);
@@ -105,6 +102,7 @@ static inline void serial_println_locked(const char *s) {
   // Honor the take result: on timeout, drop the line rather than print
   // unsynchronized OR give a mutex this task does not hold — the latter trips
   // configASSERT in xTaskPriorityDisinherit and reboots the node.
+  if (g_serial_mux == nullptr) { Serial.println(s); return; }
   if (xSemaphoreTake(g_serial_mux, pdMS_TO_TICKS(100)) == pdTRUE) {
     Serial.println(s);
     xSemaphoreGive(g_serial_mux);
@@ -114,15 +112,14 @@ static inline void serial_println_locked(const char *s) {
 // Serialize a Serial1 (mesh UART) write under the same mutex so mesh output
 // cannot interleave with USB JSON or another task's Serial1 output.
 static inline void serial1_println_locked(const char *s, int min_free) {
+  if (g_serial_mux == nullptr) {
+    if (Serial1.availableForWrite() >= min_free) Serial1.println(s);
+    return;
+  }
   if (xSemaphoreTake(g_serial_mux, pdMS_TO_TICKS(100)) == pdTRUE) {
-    if (Serial1.availableForWrite() >= min_free)
-      Serial1.println(s);
+    if (Serial1.availableForWrite() >= min_free) Serial1.println(s);
     xSemaphoreGive(g_serial_mux);
   }
-}
-
-void event_handler(void *ctx, esp_event_base_t event_base, int32_t event_id, void *event_data) {
-  // No-op handler for now
 }
 
 // BLE callback: decodes a single ODID message from each advertisement.
@@ -285,8 +282,7 @@ void setup() {
   nvs_flash_init();
   esp_netif_init();  // Modern replacement for tcpip_adapter_init
   initializeSerial();
-  esp_event_loop_create_default();  // Modern replacement
-  esp_event_handler_instance_register(ESP_EVENT_ANY_BASE, ESP_EVENT_ANY_ID, &event_handler, NULL, NULL);
+  esp_event_loop_create_default();  // required by the WiFi stack
   wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
   esp_wifi_init(&cfg);
   esp_wifi_set_storage(WIFI_STORAGE_RAM);
@@ -347,15 +343,15 @@ void print_compact_message(struct uav_data *UAV) {
   static unsigned long lastSendTime = 0;
   const unsigned long sendInterval = 5000;  // 5-second interval for UART messages
   const int MAX_MESH_SIZE = 230;
-  
+
   if (millis() - lastSendTime < sendInterval) return;
   lastSendTime = millis();
-  
+
   char mac_str[18];
   snprintf(mac_str, sizeof(mac_str), "%02x:%02x:%02x:%02x:%02x:%02x",
            UAV->mac[0], UAV->mac[1], UAV->mac[2],
            UAV->mac[3], UAV->mac[4], UAV->mac[5]);
-  
+
   char mesh_msg[MAX_MESH_SIZE];
   int msg_len = 0;
   msg_len += snprintf(mesh_msg + msg_len, sizeof(mesh_msg) - msg_len,
@@ -379,11 +375,11 @@ void print_compact_message(struct uav_data *UAV) {
 // WiFi promiscuous callback: processes packets and sends both UART and fast JSON.
 void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
   if (type != WIFI_PKT_MGMT && type != WIFI_PKT_DATA) return;
-  
+
   wifi_promiscuous_pkt_t *packet = (wifi_promiscuous_pkt_t *)buffer;
   uint8_t *payload = packet->payload;
   int length = packet->rx_ctrl.sig_len;
-  
+
   if (length < 16) return;   /* too short to safely read addr/NAN fields */
 
   if (type == WIFI_PKT_DATA) {
@@ -407,10 +403,10 @@ void callback(void *buffer, wifi_promiscuous_pkt_type_t type) {
   }
 
   uav_data UAV = {};
-  
+
   store_mac(&UAV, payload);
   UAV.rssi = packet->rx_ctrl.rssi;
-  
+
   static const uint8_t nan_dest[6] = {0x51, 0x6f, 0x9a, 0x01, 0x00, 0x00};
   if (memcmp(nan_dest, &payload[4], 6) == 0) {
     if (odid_wifi_receive_message_pack_nan_action_frame(&UAS_data,
@@ -484,7 +480,7 @@ void parse_odid(uav_data *UAV, ODID_UAS_Data *UAS_data2) {
   memset(UAV->uav_id, 0, sizeof(UAV->uav_id));
   memset(UAV->description, 0, sizeof(UAV->description));
   memset(UAV->auth_data, 0, sizeof(UAV->auth_data));
-  
+
   if (UAS_data2->BasicIDValid[0]) {
     strncpy(UAV->uav_id, (char *)UAS_data2->BasicID[0].UASID, ODID_ID_SIZE);
     UAV->uav_id[ODID_ID_SIZE] = '\0';
