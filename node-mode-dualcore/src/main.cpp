@@ -260,7 +260,7 @@ void print_compact_message(const uav_data *UAV, int slot) {
     mac_str, UAV->rssi, UAV->lat_d, UAV->long_d, UAV->altitude_msl,
     UAV->base_lat_d, UAV->base_long_d, id_esc);
 
-  serial1_println_locked(json_msg, len_msg);
+  serial1_println_locked(json_msg, len_msg + 2);   // +2 for CRLF
 }
 
 // Wi-Fi promiscuous packet callback

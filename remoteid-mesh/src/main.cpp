@@ -339,13 +339,40 @@ void send_json_fast(struct uav_data *UAV) {
 }
 
 // Sends UART messages over Serial1 exactly as before.
+// ---------------------------------------------------------------------------
+// Per-drone mesh rate limit
+// ---------------------------------------------------------------------------
+// A single shared timer let whichever drone happened to hit the window first
+// consume it, silently starving every other drone's relay — with several
+// aircraft overhead the mesh reported only one of them. Key the limit on the
+// source MAC instead so each drone gets its own interval.
+#define MESH_RL_SLOTS 8
+static uint8_t  mesh_rl_mac[MESH_RL_SLOTS][6] = {{0}};
+static uint32_t mesh_rl_last[MESH_RL_SLOTS]   = {0};
+
+static bool mesh_rate_allow(const uint8_t *mac, uint32_t interval_ms) {
+  uint32_t now = millis();
+  int free_idx = -1, oldest_idx = 0;
+  for (int i = 0; i < MESH_RL_SLOTS; i++) {
+    if (mesh_rl_last[i] != 0 && memcmp(mesh_rl_mac[i], mac, 6) == 0) {
+      if (now - mesh_rl_last[i] < interval_ms) return false;   // rollover-safe
+      mesh_rl_last[i] = now;
+      return true;
+    }
+    if (mesh_rl_last[i] == 0 && free_idx < 0) free_idx = i;
+    if (mesh_rl_last[i] < mesh_rl_last[oldest_idx]) oldest_idx = i;
+  }
+  int idx = (free_idx >= 0) ? free_idx : oldest_idx;   // evict least-recent
+  memcpy(mesh_rl_mac[idx], mac, 6);
+  mesh_rl_last[idx] = now;
+  return true;
+}
+
 void print_compact_message(struct uav_data *UAV) {
-  static unsigned long lastSendTime = 0;
-  const unsigned long sendInterval = 5000;  // 5-second interval for UART messages
   const int MAX_MESH_SIZE = 230;
 
-  if (millis() - lastSendTime < sendInterval) return;
-  lastSendTime = millis();
+  // Per-drone, not global — see mesh_rate_allow() above.
+  if (!mesh_rate_allow(UAV->mac, 5000)) return;
 
   char mac_str[18];
   snprintf(mac_str, sizeof(mac_str), "%02x:%02x:%02x:%02x:%02x:%02x",
@@ -361,14 +388,14 @@ void print_compact_message(struct uav_data *UAV) {
                         " https://maps.google.com/?q=%.6f,%.6f",
                         UAV->lat_d, UAV->long_d);
   }
-  serial1_println_locked(mesh_msg, msg_len);
+  serial1_println_locked(mesh_msg, msg_len + 2);   // +2 for CRLF
 
   if (UAV->base_lat_d != 0.0 && UAV->base_long_d != 0.0) {
     char pilot_msg[MAX_MESH_SIZE];
     int pilot_len = snprintf(pilot_msg, sizeof(pilot_msg),
-                             "Pilot: https://maps.google.com/?q=%.6f,%.6f",
-                             UAV->base_lat_d, UAV->base_long_d);
-    serial1_println_locked(pilot_msg, pilot_len);
+                             "Pilot[%s]: https://maps.google.com/?q=%.6f,%.6f",
+                             mac_str, UAV->base_lat_d, UAV->base_long_d);
+    serial1_println_locked(pilot_msg, pilot_len + 2);
   }
 }
 
