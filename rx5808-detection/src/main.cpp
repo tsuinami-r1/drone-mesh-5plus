@@ -103,10 +103,17 @@ static void emit_detection(int idx, int rssi_raw) {
 
 #if ENABLE_MESH_RELAY
     char relay[80];
-    snprintf(relay, sizeof(relay), "AnalogFM: %s%d %uMHz rssi=%d [%s]",
-             chan.band, chan.ch, chan.freq_mhz, rssi_raw, NODE_ID);
-    if (Serial1.availableForWrite() >= (int)strlen(relay) + 2)
-        Serial1.println(relay);
+    int rlen = snprintf(relay, sizeof(relay), "AnalogFM: %s%d %uMHz rssi=%d [%s]",
+                        chan.band, chan.ch, chan.freq_mhz, rssi_raw, NODE_ID);
+    if (rlen >= (int)sizeof(relay)) rlen = sizeof(relay) - 1;
+    // Single burst, '\n' only (no CR): the Meshtastic serial module in
+    // TEXTMSG mode broadcasts raw unframed chunks, so a CR rides along
+    // inside the mesh message and a separated line ending can even go out
+    // on its own as a blank-rendering message.
+    if (Serial1.availableForWrite() >= rlen + 1) {
+        Serial1.write((const uint8_t*)relay, rlen);
+        Serial1.write((uint8_t)'\n');
+    }
 #endif
 }
 
@@ -126,11 +133,23 @@ static void emit_heartbeat() {
 // ============================================================
 
 void setup() {
+#if ENABLE_MESH_RELAY
+    // Park the mesh UART TX line idle-high before the USB-CDC wait: a
+    // floating TX feeds noise into the Meshtastic radio's serial RX, which
+    // TEXTMSG mode broadcasts as blank/garbage mesh messages on every
+    // reboot or brownout.
+    pinMode(SERIAL1_TX_PIN, OUTPUT);
+    digitalWrite(SERIAL1_TX_PIN, HIGH);
+#endif
+
     Serial.begin(115200);
     // Wait up to 3 s for USB-CDC host connection before emitting data
     while (!Serial && millis() < 3000) {}
 
 #if ENABLE_MESH_RELAY
+    // TX ring buffer so availableForWrite() reflects real headroom (default
+    // FIFO-only depth is ~128 B); must be set before begin().
+    Serial1.setTxBufferSize(512);
     Serial1.begin(115200, SERIAL_8N1, SERIAL1_RX_PIN, SERIAL1_TX_PIN);
 #endif
 

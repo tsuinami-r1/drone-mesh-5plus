@@ -105,13 +105,20 @@ static inline void serial_println_locked(const char *s) {
   }
 }
 
+// Sends '\n' only (no CR), appended in the same burst: the Meshtastic serial
+// module in TEXTMSG mode broadcasts raw unframed chunks, so a CR rides along
+// inside the mesh message and a separated line ending can even be broadcast
+// on its own as a blank-rendering message.
+static inline void serial1_write_line(const char *s, int min_free) {
+  if (Serial1.availableForWrite() < min_free) return;
+  Serial1.write((const uint8_t *)s, strlen(s));
+  Serial1.write((uint8_t)'\n');
+}
+
 static inline void serial1_println_locked(const char *s, int min_free) {
-  if (g_serial_mux == nullptr) {
-    if (Serial1.availableForWrite() >= min_free) Serial1.println(s);
-    return;
-  }
+  if (g_serial_mux == nullptr) { serial1_write_line(s, min_free); return; }
   if (xSemaphoreTake(g_serial_mux, pdMS_TO_TICKS(100)) == pdTRUE) {
-    if (Serial1.availableForWrite() >= min_free) Serial1.println(s);
+    serial1_write_line(s, min_free);
     xSemaphoreGive(g_serial_mux);
   }
 }
@@ -211,8 +218,11 @@ public:
 void initializeSerial() {
   Serial.begin(115200);
   // Larger RX ring so bursty Meshtastic relay traffic is not dropped between
-  // uartForwardTask polls (must be set before begin()).
+  // uartForwardTask polls (must be set before begin()). TX ring buffer so
+  // availableForWrite() reflects real headroom (default FIFO-only depth is
+  // ~128 B and rejects a full ~200 B JSON line at the min_free guard).
   Serial1.setRxBufferSize(1024);
+  Serial1.setTxBufferSize(512);
   Serial1.begin(115200, SERIAL_8N1, SERIAL1_RX_PIN, SERIAL1_TX_PIN);
   Serial.println("USB Serial (for JSON) and UART (Serial1) initialized.");
 }
@@ -260,7 +270,7 @@ void print_compact_message(const uav_data *UAV, int slot) {
     mac_str, UAV->rssi, UAV->lat_d, UAV->long_d, UAV->altitude_msl,
     UAV->base_lat_d, UAV->base_long_d, id_esc);
 
-  serial1_println_locked(json_msg, len_msg + 2);   // +2 for CRLF
+  serial1_println_locked(json_msg, len_msg + 2);   // +2: newline + headroom
 }
 
 // Wi-Fi promiscuous packet callback
@@ -544,6 +554,12 @@ void uartForwardTask(void *parameter) {
 }
 
 void setup() {
+  // Park the mesh UART TX line idle-high before the boot delay: a floating
+  // TX feeds noise into the Meshtastic radio's serial RX, which TEXTMSG mode
+  // broadcasts as blank/garbage mesh messages on every reboot or brownout.
+  pinMode(SERIAL1_TX_PIN, OUTPUT);
+  digitalWrite(SERIAL1_TX_PIN, HIGH);
+
   delay(6000);  // 6-second boot delay (necessary for xiao meshtastic)
   setCpuFrequencyMhz(160);
 

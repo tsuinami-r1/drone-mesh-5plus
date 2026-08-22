@@ -159,6 +159,10 @@ static void dedupCleanStale(uint32_t now) {
 static char lineBuf[LINE_BUF_SIZE];
 static int  linePos = 0;
 
+// USB -> Heltec direction (see loop): only lines prefixed "MESH:" are forwarded
+static char usbLineBuf[LINE_BUF_SIZE];
+static int  usbLinePos = 0;
+
 static unsigned long lastHeartbeat  = 0;
 static unsigned long lastStats      = 0;
 static unsigned long lastCleanup    = 0;
@@ -286,6 +290,13 @@ static void processLine(const char* line, int len) {
 // Arduino Setup
 // =============================================================================
 void setup() {
+  // Park the mesh UART TX line at its idle-high state before the boot delay.
+  // A floating TX feeds noise bytes into the Heltec's serial RX, and the
+  // Meshtastic serial module in TEXTMSG mode broadcasts any bytes it sees —
+  // every reboot/brownout otherwise risks blank/garbage mesh messages.
+  pinMode(SERIAL1_TX_PIN, OUTPUT);
+  digitalWrite(SERIAL1_TX_PIN, HIGH);
+
   // Boot delay to let Heltec V3 / Meshtastic initialize
   delay(3000);
 
@@ -293,6 +304,9 @@ void setup() {
   Serial.begin(UART_BAUD);
 
   // UART -> Heltec V3 (Meshtastic)
+  // TX ring buffer so availableForWrite() reflects real headroom (the
+  // default FIFO-only depth is ~128 B); must be set before begin().
+  Serial1.setTxBufferSize(512);
   Serial1.begin(UART_BAUD, SERIAL_8N1, SERIAL1_RX_PIN, SERIAL1_TX_PIN);
 
   // LED
@@ -353,11 +367,29 @@ void loop() {
     }
   }
 
-  // ----- Forward USB Serial -> Heltec UART (bidirectional) -----
-  // Allows mesh-mapper.py or user to send commands to the Heltec V3
+  // ----- Forward USB Serial -> Heltec UART (filtered) -----
+  // Only lines explicitly prefixed "MESH:" are forwarded (prefix stripped).
+  // The Heltec's serial module in TEXTMSG mode broadcasts every byte on its
+  // RX to the whole mesh channel, so an unconditional pass-through turned
+  // mesh-mapper.py's WATCHDOG_RESET keepalives and OS port probes
+  // (e.g. ModemManager AT commands) into mesh-wide text messages.
   while (Serial.available()) {
     char c = Serial.read();
-    Serial1.write(c);
+    if (c == '\n' || c == '\r') {
+      if (usbLinePos > 0) {
+        usbLineBuf[usbLinePos] = '\0';
+        if (strncmp(usbLineBuf, "MESH:", 5) == 0 && usbLineBuf[5] != '\0') {
+          Serial1.write((const uint8_t *)usbLineBuf + 5, usbLinePos - 5);
+          Serial1.write((uint8_t)'\n');
+        }
+        usbLinePos = 0;
+      }
+    } else if (usbLinePos < LINE_BUF_SIZE - 1) {
+      usbLineBuf[usbLinePos++] = c;
+    } else {
+      // Overlong line - discard rather than forward a fragment
+      usbLinePos = 0;
+    }
   }
 
   // ----- LED update -----

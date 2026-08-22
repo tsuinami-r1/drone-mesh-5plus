@@ -366,9 +366,15 @@ static void send_json(const uav_data *UAV) {
 static void send_to_mesh(const uav_data *UAV) {
   char json[300];
   int len = buildJson(json, sizeof(json), UAV);
+  if (len >= (int)sizeof(json)) len = sizeof(json) - 1;  // snprintf reports untruncated length
 
-  if (Serial1.availableForWrite() >= len) {
-    Serial1.println(json);
+  // Single burst, '\n' only (no CR): the Meshtastic serial module in TEXTMSG
+  // mode broadcasts raw unframed chunks, so stray CR bytes ride along inside
+  // the mesh message and a separated line ending can even go out on its own
+  // as a blank-rendering message.
+  if (Serial1.availableForWrite() >= len + 1) {
+    Serial1.write((const uint8_t *)json, len);
+    Serial1.write((uint8_t)'\n');
   }
 }
 
@@ -490,6 +496,12 @@ static void uartForwardTask(void *param) {
 // Arduino Entry Points
 // =============================================================================
 void setup() {
+  // Park the mesh UART TX line idle-high before the boot delay: a floating
+  // TX feeds noise into the Heltec's serial RX, which TEXTMSG mode
+  // broadcasts as blank/garbage mesh messages on every reboot or brownout.
+  pinMode(SERIAL1_TX_PIN, OUTPUT);
+  digitalWrite(SERIAL1_TX_PIN, HIGH);
+
   delay(3000);  // Boot delay (Meshtastic serial init timing)
   setCpuFrequencyMhz(160);
 
@@ -498,6 +510,10 @@ void setup() {
 
   // Serial init
   Serial.begin(115200);
+  // TX ring buffer so availableForWrite() can admit a full JSON line — the
+  // default FIFO-only depth (~128 B) made the send_to_mesh() guard reject
+  // every ~200 B message. Must be set before begin().
+  Serial1.setTxBufferSize(512);
   Serial1.begin(115200, SERIAL_8N1, SERIAL1_RX_PIN, SERIAL1_TX_PIN);
 
   // LED init

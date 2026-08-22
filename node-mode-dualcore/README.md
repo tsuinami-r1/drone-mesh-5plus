@@ -131,7 +131,10 @@ Lean mesh-to-USB bridge with dedup. No detection.
 - Deduplicates by drone MAC (500ms window, first-in wins)
 - Forwards clean data to USB Serial for `mesh-mapper.py`
 - Non-JSON lines (Meshtastic debug) forwarded with `[MESH]` prefix
-- Bidirectional: USB-to-UART pass-through for sending commands to the Heltec
+- USB-to-UART forwarding is filtered: only lines prefixed `MESH:` are passed to the
+  Heltec (prefix stripped). Everything else on the USB port — mesh-mapper watchdog
+  keepalives, OS serial-port probes, stray terminal input — is dropped so it cannot
+  be broadcast to the mesh channel by the Meshtastic serial module
 - Heartbeat every 30s with active drone count
 - Stats every 60s (received/forwarded/suppressed counts)
 - Stale dedup entries auto-cleared after 30s
