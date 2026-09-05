@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """
-Universal system-wide dependency installer for mapper.py
-Works on different systems (Linux, macOS, Windows)
-Enhanced version with comprehensive dependency detection and installation
+Universal system-wide dependency installer for mesh-mapper.py
+(tsuinami-r1/drone-mesh-5plus). Works on Linux, macOS and Windows.
+
+Installs the packages listed in the repository's requirements.txt (found next
+to this script's parent directory or in the current directory), falling back
+to a built-in copy of that list when the file is not present.
 """
 
 import subprocess
@@ -13,7 +16,7 @@ import platform
 def print_banner():
     """Print a nice banner"""
     print("🚀" + "="*60 + "🚀")
-    print("   UNIVERSAL MAPPER.PY DEPENDENCY INSTALLER")
+    print("   MESH-MAPPER.PY DEPENDENCY INSTALLER")
     print("🚀" + "="*60 + "🚀")
 
 def detect_system():
@@ -161,34 +164,39 @@ def install_pip(system, package_manager):
     print("❌ Could not install pip automatically")
     return None
 
+FALLBACK_REQUIREMENTS = [
+    "flask>=2.0.0",
+    "flask-socketio>=5.0.0",
+    "requests>=2.25.0",
+    "urllib3>=1.26.0",
+    "pyserial>=3.5",
+]
+
+def find_requirements_file():
+    """Locate the repo's requirements.txt: repo root (parent of RPI/) or cwd"""
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        os.path.join(os.path.dirname(script_dir), "requirements.txt"),
+        os.path.join(script_dir, "requirements.txt"),
+        os.path.join(os.getcwd(), "requirements.txt"),
+    ]
+    for path in candidates:
+        if os.path.isfile(path):
+            return path
+    return None
+
 def get_all_dependencies():
-    """Get all required dependencies for mapper.py"""
-    # Core dependencies from analyzing mapper.py
-    dependencies = [
-        "requests",           # HTTP library
-        "urllib3",           # HTTP client library
-        "pyserial",          # Serial communication
-        "Flask",             # Web framework
-        "flask-socketio",    # WebSocket support for Flask
-        "Werkzeug",          # WSGI utility library
-        "Jinja2",            # Template engine
-        "click",             # Command line interface
-        "itsdangerous",      # Cryptographic signing
-        "MarkupSafe",        # String handling library
-        "wheel",             # Built-package format
-        "setuptools",        # Package development tools
-        "eventlet",          # Async networking library (for socketio)
-        "python-socketio",   # Socket.IO client/server
-    ]
-    
-    # Optional but helpful packages
-    optional_dependencies = [
-        "pip-tools",         # Dependency management
-        "psutil",           # System utilities
-        "colorama",         # Cross-platform colored terminal text
-    ]
-    
-    return dependencies, optional_dependencies
+    """Get the required dependencies for mesh-mapper.py"""
+    req_file = find_requirements_file()
+    if req_file:
+        print(f"📄 Using {req_file}")
+        with open(req_file, encoding="utf-8") as f:
+            dependencies = [line.strip() for line in f
+                            if line.strip() and not line.lstrip().startswith("#")]
+        if dependencies:
+            return dependencies, []
+    print("📄 requirements.txt not found, using the built-in list")
+    return list(FALLBACK_REQUIREMENTS), []
 
 def install_dependencies(pip_cmd, system):
     """Install all required dependencies"""
@@ -211,8 +219,8 @@ def install_dependencies(pip_cmd, system):
         ("basic install", f"{pip_cmd} install"),
     ]
     
-    # Try installing all packages at once first
-    packages_str = " ".join(all_packages)
+    # Try installing all packages at once first (quoted: specs contain '>=')
+    packages_str = " ".join(f'"{p}"' for p in all_packages)
     
     for strategy_name, base_cmd in strategies:
         print(f"\n🔧 Trying strategy: {strategy_name}")
@@ -234,7 +242,7 @@ def install_dependencies(pip_cmd, system):
         package_installed = False
         
         for strategy_name, base_cmd in strategies[:3]:  # Try top 3 strategies
-            install_cmd = f"{base_cmd} {package}"
+            install_cmd = f'{base_cmd} "{package}"'
             print(f"🔧 Installing {package} with {strategy_name}...")
             
             success, output = run_command(install_cmd)
@@ -293,7 +301,7 @@ def test_imports():
 def create_test_script():
     """Create a test script to verify installation"""
     test_script = """#!/usr/bin/env python3
-# Quick test script for mapper.py dependencies
+# Quick test script for mesh-mapper.py dependencies
 
 try:
     import os, time, json, csv, logging, threading
@@ -312,7 +320,7 @@ try:
     socketio = SocketIO(app)
     print("✅ Flask + SocketIO working")
     
-    print("🎉 mapper.py dependencies are ready!")
+    print("🎉 mesh-mapper.py dependencies are ready!")
     
 except ImportError as e:
     print(f"❌ Import error: {e}")
@@ -342,21 +350,20 @@ def print_final_summary(success, method, system):
         
         print(f"\n🚀 NEXT STEPS:")
         print(f"   1. Test your setup: python3 test_dependencies.py")
-        print(f"   2. Run your mapper: python3 mapper.py")
-        print(f"   3. For headless mode: python3 mapper.py --headless")
-        print(f"   4. For help: python3 mapper.py --help")
-        
+        print(f"   2. Run the mapper: python3 mesh-mapper.py")
+        print(f"   3. For headless mode: python3 mesh-mapper.py --headless")
+        print(f"   4. For help: python3 mesh-mapper.py --help")
+
     else:
         print("❌ INSTALLATION INCOMPLETE")
         print(f"\n🔧 TROUBLESHOOTING:")
-        print(f"   1. Try with sudo: sudo python3 install_universal.py")
-        print(f"   2. Manual install: pip3 install requests flask pyserial flask-socketio")
+        print(f"   1. Try with sudo: sudo python3 RPI/rpi_dependancies.py")
+        print(f"   2. Manual install: pip3 install --break-system-packages -r requirements.txt")
         print(f"   3. Use virtual environment: python3 -m venv venv && source venv/bin/activate")
         print(f"   4. Check system package manager (apt, yum, dnf, etc.)")
-    
+
     print("\n📝 FILES CREATED:")
     print("   • test_dependencies.py - Test script")
-    print("   • install_universal.py - This installer")
     
     print("🎯" + "="*60 + "🎯")
 

@@ -328,12 +328,22 @@ python3 mesh-mapper.py
 
 Open **http://localhost:5000** (the server binds all interfaces, so any machine on the
 LAN can reach it on the host's IP). In the Settings panel select the home node's USB
-serial port; the mapper also auto-connects to remembered ports on later runs. For a
-Raspberry Pi collection point, clone the repo onto the Pi and add an `@reboot` cron
-entry that runs the command above.
+serial port; the mapper also auto-connects to remembered ports on later runs.
 
-> The `RPI/` installer scripts are inherited from upstream and download upstream's
-> `mesh-mapper.py`, not this fork's. Use the clone above instead.
+**Raspberry Pi collection point.** One command fetches the mapper and
+`requirements.txt` from this repository, installs the dependencies, and adds an
+`@reboot` cron job so the Pi comes back up on its own after a power cut:
+
+```bash
+wget https://raw.githubusercontent.com/tsuinami-r1/drone-mesh-5plus/main/RPI/install_rpi.py
+python3 install_rpi.py                       # installs to ~/mesh-mapper, cron on
+python3 install_rpi.py --branch <name>       # track a different branch
+python3 install_rpi.py --no-cron --skip-deps # download only
+```
+
+Re-run it with `--force` to update in place. `RPI/rpi_dependancies.py` is a
+standalone dependency installer for any Linux, macOS or Windows host that already has
+a clone; it reads the same `requirements.txt`.
 
 ### Step 8 — Smoke-test without hardware
 

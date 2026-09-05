@@ -2,7 +2,7 @@
 
 **colonelpanichacks**
 
-Two firmwares for the Seeed XIAO ESP32S3 paired with a Heltec V3 running Meshtastic. Remote nodes detect drones. Home node receives detections from the mesh and feeds them to [mesh-mapper.py](https://github.com/colonelpanichacks/drone-mesh-mapper).
+Two firmwares for the Seeed XIAO ESP32S3 paired with a Heltec V3 running Meshtastic. Remote nodes detect drones. Home node receives detections from the mesh and feeds them to [mesh-mapper.py](../mesh-mapper.py).
 
 ---
 
