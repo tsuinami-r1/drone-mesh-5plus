@@ -15,7 +15,7 @@ Pre-built `.bin` files for flashing without PlatformIO.
 
 | File | Project | PIO Environment | Hardware | Notes |
 |------|---------|-----------------|----------|-------|
-| `xiao-c5-dualband.bin` | `remoteid-c5-5g` | `seeed_xiao_esp32c5` | XIAO ESP32-C5 | 2.4+5GHz WiFi 6, BLE 5.0 + Coded PHY |
+| `xiao-c5-dualband.bin` | `remoteid-c5-5g` | `seeed_xiao_esp32c5` | XIAO ESP32-C5 | 2.4+5GHz WiFi 6, BLE 5.0 + Coded PHY. Heltec UART on D4/D5 (GPIO6/GPIO7), same header pins as the S3 builds. |
 | `xiao-s3-nimble.bin` | `remoteid-c5-5g` | `seeed_xiao_esp32s3` | XIAO ESP32-S3 | 2.4GHz, NimBLE + Coded PHY. **Preferred S3 build** — the only one with both channel hopping and Coded PHY. |
 | `xiao-s3-single.bin` | `remoteid-mesh` | `seeed_xiao_esp32s3` | XIAO ESP32-S3 | 2.4GHz, classic BLE, single-core |
 | `xiao-s3-dualcore.bin` | `remoteid-mesh-dualcore` | `seeed_xiao_esp32s3` | XIAO ESP32-S3 | 2.4GHz, classic BLE, dual-core tasks |

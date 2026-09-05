@@ -6,7 +6,8 @@
  *
  * Output:
  *   USB Serial  — JSON lines for mesh-mapper.py
- *   Serial1 UART (TX=GPIO5, RX=GPIO6) — compact messages for Heltec/Meshtastic relay
+ *   Serial1 UART on XIAO D4 (TX) / D5 (RX) — compact messages for Heltec/Meshtastic
+ *   relay. GPIO5/6 on the S3, GPIO6/7 on the C5.
  *
  * For ESP32-C5: Dual-band scanning with fast channel hopping across 2.4+5GHz
  * For ESP32-S3: Single-band 2.4GHz scanning (original behavior)
@@ -34,11 +35,19 @@
 #include <freertos/semphr.h>
 
 // ============================================================================
-// UART Pins — same wiring as remoteid-mesh-dualcore (Heltec LoRa V3)
+// UART Pins — Heltec LoRa V3 relay on XIAO D4 (TX) / D5 (RX)
 // ============================================================================
+// The same physical D4/D5 header pins on both boards, so the existing S3
+// carrier PCBs fit a C5 unchanged. The GPIO numbers behind those labels differ
+// per board (matches rx5808-detection).
 
-const int SERIAL1_TX_PIN = 5;   // GPIO5 → Heltec RX
-const int SERIAL1_RX_PIN = 6;   // GPIO6 → Heltec TX
+#if defined(CONFIG_IDF_TARGET_ESP32C5) || defined(ARDUINO_XIAO_ESP32C5)
+  const int SERIAL1_TX_PIN = 6;   // D4 on XIAO ESP32-C5 → Heltec RX
+  const int SERIAL1_RX_PIN = 7;   // D5 on XIAO ESP32-C5 ← Heltec TX
+#else
+  const int SERIAL1_TX_PIN = 5;   // D4 on XIAO ESP32-S3 → Heltec RX
+  const int SERIAL1_RX_PIN = 6;   // D5 on XIAO ESP32-S3 ← Heltec TX
+#endif
 
 // ============================================================================
 // Regulatory domain — set to match the deployment jurisdiction

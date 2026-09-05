@@ -261,11 +261,11 @@ Within a few seconds of boot the monitor should show a banner naming the board a
 mode. The `remoteid-c5-5g` build then prints its UART pins and scan schedule:
 
 ```
-UART:  TX=GPIO5, RX=GPIO6 → Heltec
+UART:  TX=GPIO6, RX=GPIO7 → Heltec
 [SCAN] Channel hopping: 8 primary + 10 secondary, dwell 50 ms
 ```
 
-(`3 primary` and `dwell 200 ms` on an S3.) An RX5808 node prints
+(`TX=GPIO5, RX=GPIO6`, `3 primary` and `dwell 200 ms` on an S3.) An RX5808 node prints
 `{"info":"RX5808 scanner ready", ...}` instead. Any
 `channel N rejected by regulatory domain` line means Step 3 was skipped.
 
@@ -278,10 +278,11 @@ UART:  TX=GPIO5, RX=GPIO6 → Heltec
 
 ### Step 5 — Wire the node to its Heltec and configure Meshtastic
 
-Three wires between the XIAO and the Heltec V3: XIAO TX → Heltec RX, XIAO RX ←
-Heltec TX, GND ↔ GND. The XIAO GPIOs depend on the firmware project — see the
-[wiring table](#wiring-for-mesh-integration). Power the Heltec from its own supply
-or the XIAO's 3.3 V/5 V pin as your build dictates.
+Three wires between the XIAO and the Heltec V3: XIAO **D4** (TX) → Heltec RX, XIAO
+**D5** (RX) ← Heltec TX, GND ↔ GND. The same D4/D5 header pins are used on the S3 and
+the C5, so one carrier PCB serves both; the firmware picks the right GPIOs at compile
+time (see the [wiring table](#wiring-for-mesh-integration)). Power the Heltec from its
+own supply or the XIAO's 3.3 V/5 V pin as your build dictates.
 
 Flash stock [Meshtastic](https://meshtastic.org/) to the Heltec, then enable the
 **Serial Module** in text-message mode on the pins you wired (the reference build uses
@@ -308,7 +309,7 @@ range ring in the wrong place. All Heltecs must share the same channel and key.
 ### Step 6 — Set up the home end
 
 1. Flash a XIAO ESP32-S3 with `node-mode-dualcore` → `home_node` (Steps 2–4).
-2. Wire it to the home Heltec (GPIO5 → Heltec RX, GPIO6 ← Heltec TX, GND) and
+2. Wire it to the home Heltec (D4/GPIO5 → Heltec RX, D5/GPIO6 ← Heltec TX, GND) and
    configure that Heltec's serial module exactly as in Step 5.
 3. Plug the home XIAO into the host machine over USB. It forwards deduplicated JSON
    detections from the mesh to USB, and only forwards lines prefixed `MESH:` in the
@@ -413,19 +414,20 @@ that ATAK / WinTAK / iTAK pick up over multicast. Runtime output lands in
 
 ### Wiring for mesh integration
 
-Three wires per node. The UART GPIOs are fixed in each firmware project, so wire to
-match the project you flashed. XIAO silkscreen labels are given in brackets.
+Three wires per node, always on the XIAO's **D4 (TX) and D5 (RX)** header pins for
+the current firmware, so the same carrier PCB fits an S3 or a C5. The GPIO numbers
+behind those labels differ per board and are selected at compile time.
 
 | Firmware | Board | XIAO TX → Heltec RX | XIAO RX ← Heltec TX |
 |----------|-------|---------------------|---------------------|
-| `remoteid-c5-5g` | ESP32-S3 | GPIO5 (D4) | GPIO6 (D5) |
-| `remoteid-c5-5g` | ESP32-C5 | GPIO5 (D3) | GPIO6 (D4) |
-| `node-mode-dualcore` (remote and home) | ESP32-S3 | GPIO5 (D4) | GPIO6 (D5) |
-| `remoteid-mesh-dualcore` | ESP32-S3 | GPIO5 (D4) | GPIO6 (D5) |
-| `remoteid-mesh` | ESP32-S3 | GPIO6 (D5) | GPIO7 (D8) |
-| `remoteid-mesh` | ESP32-C3 | GPIO6 (D4) | GPIO7 (D5) |
-| `rx5808-detection` | ESP32-S3 | GPIO5 (D4) | GPIO6 (D5) |
-| `rx5808-detection` | ESP32-C5 | GPIO6 (D4) | GPIO7 (D5) |
+| `remoteid-c5-5g` | ESP32-S3 | D4 (GPIO5) | D5 (GPIO6) |
+| `remoteid-c5-5g` | ESP32-C5 | D4 (GPIO6) | D5 (GPIO7) |
+| `rx5808-detection` | ESP32-S3 | D4 (GPIO5) | D5 (GPIO6) |
+| `rx5808-detection` | ESP32-C5 | D4 (GPIO6) | D5 (GPIO7) |
+| `node-mode-dualcore` (remote and home) | ESP32-S3 | D4 (GPIO5) | D5 (GPIO6) |
+| `remoteid-mesh-dualcore` | ESP32-S3 | D4 (GPIO5) | D5 (GPIO6) |
+| `remoteid-mesh` (legacy) | ESP32-S3 | D5 (GPIO6) | D8 (GPIO7) |
+| `remoteid-mesh` (legacy) | ESP32-C3 | D4 (GPIO6) | D5 (GPIO7) |
 
 Plus **GND ↔ GND**. On the Heltec side use whichever free GPIOs you configured as
 `serial.rxd` / `serial.txd` in Meshtastic (19 / 20 in the reference build). The
