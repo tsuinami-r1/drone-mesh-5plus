@@ -4,14 +4,14 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python](https://img.shields.io/badge/Python-3.7+-blue.svg)](https://www.python.org/)
-[![ESP32](https://img.shields.io/badge/ESP32-Compatible-green.svg)](https://www.espressif.com/)
-[![Flask](https://img.shields.io/badge/Flask-2.0+-red.svg)](https://flask.palletsprojects.com/)
+[![ESP32](https://img.shields.io/badge/ESP32-S3%20%7C%20C5-green.svg)](https://www.espressif.com/)
+[![PlatformIO](https://img.shields.io/badge/PlatformIO-pioarduino-orange.svg)](https://github.com/pioarduino/platform-espressif32)
 
 **A private, discreet, solar-powered counter-surveillance network for drone detection.**
 
 Real-time Remote ID, DJI DroneID, MAVLink & analog-FPV mapping over a Meshtastic-linked mesh of unattended ESP32 nodes
 
-[🚀 Quick Start](#-quick-start) • [📋 Features](#-features) • [🛠️ API Reference](#-api-reference) • [🔧 Hardware](#-hardware-setup)
+[🚀 Quick Start](#-quick-start) • [📦 Firmware](#-firmware-variants) • [🔧 Hardware](#-hardware-setup) • [🛠️ API Reference](#️-api-reference)
 
 <img src="eye.png" alt="Drone Detection Eye" style="width:50%; height:25%;">
 
@@ -24,9 +24,22 @@ Real-time Remote ID, DJI DroneID, MAVLink & analog-FPV mapping over a Meshtastic
 Special thanks to "Alik", 93rd OMBR; and "Ivan", 427th UAS Brigade, Armed Forces of Ukraine, for their help.
 Slava Ukraini.
 
-Advanced drone detection system that captures and maps Remote ID broadcasts from drones using ESP32 hardware. Features real-time web interface, persistent tracking across sessions, and comprehensive data export capabilities.
+This is a hardened fork of
+[colonelpanichacks/drone-mesh-mapper](https://github.com/colonelpanichacks/drone-mesh-mapper)
+(original code by Luke Switzer and ColonelPanic), reworked for a multi-node,
+city-scale deployment on a mix of XIAO ESP32-S3 and ESP32-C5 boards. On top of the
+upstream Remote ID mapper it adds:
 
-Original code by Luke Switzer and ColonelPanic. Currently prototyping RX5808 integration for analog 5.8 GHz FM scanning.
+- **DJI DroneID** and **MAVLink** decoding in every firmware variant
+- **Full-band channel scanning** (all 13 × 2.4 GHz channels, plus 5 GHz UNII-3 on the C5)
+  with hit-triggered dwell, instead of a fixed channel
+- **XIAO ESP32-C5 dual-band** support, built on the [pioarduino](https://github.com/pioarduino/platform-espressif32)
+  platform (Arduino-ESP32 core 3.x)
+- **RX5808 analog FPV detection** nodes with range rings on the map
+- **TAK / ATAK / WinTAK** Cursor-on-Target output and inbound operator positions
+- Unattended-operation hardening: watchdog resets, serial reconnect loops, bounded
+  over-the-air parsers, per-drone mesh rate limiting, and filtering so serial-side
+  noise can never be broadcast onto the mesh
 
 ---
 
@@ -53,7 +66,6 @@ picture of who is flying and from where, without ever tipping them off.
   LoRa (Meshtastic) radio over UART. Detections travel home over the **encrypted LoRa
   mesh.** No Wi-Fi, no cellular, no internet backhaul. This is what lets the network
   blanket a wide area, including places with no power or connectivity.
-  Alternatively, if deployed on a rooftop, MQTT via the building's network is also possible.
 - **Remote, unattended, solar-powered.** Nodes run standalone in the field; the
   reference build is **solar powered**. There is no operator at the node — it wakes,
   listens, relays over the mesh, and keeps running. The firmware is hardened for
@@ -74,9 +86,11 @@ detection nodes simultaneously, each named to match its paired Meshtastic node.
 | ASTM F3411 / OpenDroneID | 802.11 beacon (IE 221) | `FA:0B:BC` | All variants |
 | ASD-STAN 4709-002 | 802.11 beacon (IE 221) | `90:3A:E6` | All variants |
 | ASTM F3411 / OpenDroneID | Wi-Fi NAN action frame | `org.opendroneid.remoteid` hash | All variants |
-| **DJI DroneID** | **802.11 beacon (IE 221)** | **`26:37:12`** | **All variants (this branch)** |
+| ASTM F3411 / OpenDroneID | Bluetooth 4 / 5 advertising (Coded PHY on C5 and NimBLE S3 builds) | Service data `0xFFFA` | All variants |
+| **DJI DroneID** | **802.11 beacon (IE 221)** | **`26:37:12`** | **All variants** |
 | DJI OcuSync / O3 / O4 | OFDM (~2.4295 GHz video band) | — | ❌ Requires SDR |
-| **MAVLink GPS** | **802.11 data frame (UDP/14550)** | **any MAC** | **All variants (this branch)** |
+| **MAVLink GPS** | **802.11 data frame (UDP/14550)** | **any MAC** | **All variants** |
+| **Analog FPV video** | **5.645–5.945 GHz FM** | **synthetic `AF:00:…` MAC** | **`rx5808-detection`** |
 
 > **DJI Wi-Fi coverage caveat:** Modern DJI aircraft (Mini 3 Pro, Air 3, Mavic 3 series) primarily use OcuSync/O3/O4 for their DroneID downlink, which is OFDM in the video band and **cannot be demodulated by an ESP32**. The Wi-Fi IE221 DroneID broadcast (`26:37:12`) is present on older and budget models; treat it as partial fleet coverage, not "all DJI".
 
@@ -117,119 +131,243 @@ boards need less hold because they come back sooner.
 
 ### Regulatory domain
 
-The firmware sets the Wi-Fi country to permit **channels 1–13**; the ESP-IDF default
-stops at 11 and silently rejects anything above it. Nodes are receive-only, so this has
-no transmit implications — but set `schan`/`nchan` in `setup()` to match your
-jurisdiction (US: `schan=1, nchan=11`).
+The ESP-IDF default Wi-Fi country stops at channel 11 and **silently rejects** anything
+above it, so each detection firmware sets its own country code at the top of
+`main.cpp`:
+
+```cpp
+#define WIFI_COUNTRY_CC   "HK"   // US/FCC: "US", 1, 11   EU/HK: 1, 13   Japan: 1, 14
+#define WIFI_CHAN_START   1
+#define WIFI_CHAN_COUNT   13
+```
+
+Nodes are receive-only, so this has no transmit implications — but set it to match your
+jurisdiction before building. Prefer over-declaring: a channel the hardware refuses is
+skipped and logged (`channel N rejected by regulatory domain`), while a channel excluded
+here is never scanned at all.
 
 ---
 
 ## ⚡ **Quick Start**
 
-### 🔧 **Automated Setup** (Recommended)
+The whole path from a bare board to a dot on the map. Firmware is built with
+**PlatformIO inside VS Code, via the pioarduino extension**; the mapper is a single
+Python script.
 
-Download and install everything automatically using the official RPI setup scripts:
+### What you need
 
-```bash
-# Download the RPI setup script
-wget https://raw.githubusercontent.com/colonelpanichacks/drone-mesh-mapper/main/RPI/install_rpi.py
+| Role | Hardware | Quantity |
+|------|----------|----------|
+| Detection node | Seeed **XIAO ESP32-C5** (dual-band, preferred) or **XIAO ESP32-S3** | one per site |
+| Field mesh radio | **Heltec WiFi LoRa 32 V3** running Meshtastic, wired to each detection node | one per node |
+| Home receiver | one more Heltec V3 + one XIAO ESP32-S3 flashed as the `home_node` UART bridge | 1 |
+| Host | Any Linux / macOS / Windows machine or Raspberry Pi with Python 3.7+ | 1 |
+| Optional | **RX5808** 5.8 GHz receiver module for analog FPV nodes | per FPV node |
+| Build machine | A computer with VS Code and a USB-C cable | 1 |
 
-# Install from main branch (stable)
-python3 install_rpi.py --branch main
+### Step 1 — Install the toolchain: VS Code + pioarduino
 
-# Or install from Dev branch (latest features)  
-python3 install_rpi.py --branch Dev
-```
+Use **PlatformIO running inside VS Code through the pioarduino IDE extension**. Every
+`platformio.ini` in this repo pins the
+[pioarduino `platform-espressif32`](https://github.com/pioarduino/platform-espressif32)
+release (`55.03.39`), because the XIAO ESP32-C5 and the NimBLE / Coded PHY builds need
+Arduino-ESP32 core 3.x, which the stock PlatformIO `espressif32` platform never
+adopted. The pioarduino extension ships a PlatformIO core that is tested against that
+platform, so it is the path of least resistance. Arduino IDE is not supported for
+these projects.
 
-**Advanced Setup Options:**
-```bash
-# Custom installation directory
-python3 install_rpi.py --branch main --install-dir /opt/mesh-mapper
-
-# Skip auto-start cron job
-python3 install_rpi.py --branch main --no-cron
-
-# Force overwrite existing installation
-python3 install_rpi.py --branch Dev --force
-```
-
-### 📦 **Dependency Installation**
-
-Install all required dependencies automatically:
-
-```bash
-# Download and run the universal dependency installer
-wget https://raw.githubusercontent.com/colonelpanichacks/drone-mesh-mapper/main/RPI/rpi_dependancies.py
-python3 rpi_dependancies.py
-```
-
-This installer handles:
-- ✅ **System Detection**: Automatically detects Linux, macOS, Windows
-- ✅ **Package Manager Support**: apt, yum, dnf, pacman, brew, pkg
-- ✅ **Python & pip**: Ensures compatible Python 3.7+ and pip installation
-- ✅ **Core Dependencies**: Flask, Flask-SocketIO, pyserial, requests
-- ✅ **Optional Packages**: Performance and development tools
-
-### 📖 **Manual Setup**
-
-1. **Download mapper**
+1. Install [Visual Studio Code](https://code.visualstudio.com/).
+2. Open the Extensions view (`Ctrl+Shift+X` / `Cmd+Shift+X`), search for
+   **`pioarduino`**, and install **pioarduino IDE** (publisher *pioarduino*).
+   If the official *PlatformIO IDE* extension is already installed, disable it
+   first — both register the same commands and toolbar.
+3. Wait for the status bar to finish "Installing PlatformIO Core". Reload VS Code when
+   prompted. A PlatformIO alien-head icon appears in the activity bar.
+4. **Linux only:** install the udev rules so the XIAO enumerates without root, then
+   add yourself to the serial group and log out/in:
    ```bash
-   wget https://raw.githubusercontent.com/colonelpanichacks/drone-mesh-mapper/main/mesh-mapper.py
+   curl -fsSL https://raw.githubusercontent.com/platformio/platformio-core/develop/platformio/assets/system/99-platformio-udev.rules \
+     | sudo tee /etc/udev/rules.d/99-platformio-udev.rules
+   sudo udevadm control --reload-rules && sudo udevadm trigger
+   sudo usermod -aG dialout $USER     # 'uucp' on Arch
+   ```
+5. Clone this repo:
+   ```bash
+   git clone https://github.com/tsuinami-r1/drone-mesh-5plus.git
    ```
 
-2. **Install dependencies**
-   ```bash
-   pip3 install Flask Flask-SocketIO pyserial requests python-socketio eventlet
-   ```
+> **Command-line alternative.** The same projects build headless with the PlatformIO
+> CLI (`pipx install platformio` or `pip install platformio`), including on a
+> Raspberry Pi. The `pio run` commands below are the CLI equivalents of each VS Code
+> action, and the platform pin in `platformio.ini` means no extra setup is needed.
 
-3. **Flash ESP32 firmware**
-   - Choose appropriate firmware from `firmware/` directory
-   - Use Arduino IDE, PlatformIO, or esptool.py
-   - Configure WiFi channel and mesh settings
+### Step 2 — Pick a firmware and open it
 
-4. **Run Mapper**
-   ```bash
-   python3 mesh-mapper.py
-   ```
+Open the **firmware project folder**, not the repo root: **File → Open Folder…** and
+choose one of the directories below. PlatformIO looks for `platformio.ini` in the
+workspace root, so opening the repo root shows no build targets.
+
+| Board | Open this folder | Environment | Notes |
+|-------|------------------|-------------|-------|
+| XIAO ESP32-C5 | `remoteid-c5-5g/` | `seeed_xiao_esp32c5` | Dual-band 2.4 + 5 GHz, BLE 5 Coded PHY. **Preferred node.** |
+| XIAO ESP32-S3 | `remoteid-c5-5g/` | `seeed_xiao_esp32s3` | 2.4 GHz, NimBLE + Coded PHY. **Preferred S3 build.** |
+| XIAO ESP32-S3 (home receiver) | `node-mode-dualcore/` | `home_node` | UART→USB bridge with dedup, no detection. Plugs into the host. |
+| XIAO ESP32-S3 or C5 + RX5808 | `rx5808-detection/` | `seeed_xiao_esp32s3` / `seeed_xiao_esp32c5` | Analog FPV sweep. See [RX5808](#-rx5808-58ghz-analog-fm-detection-rx5808-detection). |
+
+The remaining projects (`remoteid-mesh`, `remoteid-mesh-dualcore`, the
+`node-mode-dualcore` `remote_node` env) are older S3-only detection builds that are
+kept working; see [Firmware variants](#-firmware-variants).
+
+The first time a project opens, pioarduino downloads the platform, toolchains and
+libraries (several hundred MB). Let it finish before building.
+
+### Step 3 — Set the compile-time options
+
+These are `#define`s, so they must be set **before** building — a prebuilt binary
+cannot be changed afterwards.
+
+- **Regulatory domain** (every detection `main.cpp`, near the top): set
+  `WIFI_COUNTRY_CC`, `WIFI_CHAN_START`, `WIFI_CHAN_COUNT` for your jurisdiction. See
+  [Regulatory domain](#regulatory-domain).
+- **`NODE_ID`** (`rx5808-detection/src/main.cpp`): unique per RX5808 node, and it
+  **must equal the paired Meshtastic node's shortName/longName** for range rings to
+  resolve. Wi-Fi/BLE detection nodes derive their `node_id` from the chip MAC and need
+  no edit.
+- **`ENABLE_MESH_RELAY`** (`rx5808-detection/src/main.cpp`): set to `0` for a
+  USB-only RX5808 node with no Heltec attached.
+
+### Step 4 — Build, flash, verify
+
+Plug the XIAO in over USB-C, then in VS Code:
+
+1. Click the PlatformIO icon in the activity bar → **Project Tasks** → expand the
+   environment for your board (e.g. `seeed_xiao_esp32c5`).
+2. **General → Build** to compile. Fix any errors before flashing.
+3. **General → Upload** to flash. PlatformIO auto-detects the port; with several
+   boards attached, add `upload_port = /dev/ttyACM0` (or `COM7`) to that env in
+   `platformio.ini`.
+4. **General → Monitor** to open the serial monitor. `monitor_speed = 115200` is
+   already set in every project.
+
+CLI equivalents, run from inside the project folder:
+
+```bash
+pio run -e seeed_xiao_esp32c5                    # build
+pio run -e seeed_xiao_esp32c5 --target upload    # build + flash
+pio device monitor                               # serial monitor (115200)
+```
+
+Within a few seconds of boot the monitor should show a banner naming the board and
+mode. The `remoteid-c5-5g` build then prints its UART pins and scan schedule:
+
+```
+UART:  TX=GPIO5, RX=GPIO6 → Heltec
+[SCAN] Channel hopping: 8 primary + 10 secondary, dwell 50 ms
+```
+
+(`3 primary` and `dwell 200 ms` on an S3.) An RX5808 node prints
+`{"info":"RX5808 scanner ready", ...}` instead. Any
+`channel N rejected by regulatory domain` line means Step 3 was skipped.
+
+> **ESP32-C5 boot mode:** if the upload fails to connect, hold **BOOT**, tap
+> **RESET**, release **BOOT**, then re-run Upload. The S3 does not need this.
+
+> **No toolchain at all?** `firmware/` holds prebuilt default-configuration
+> binaries for all eight targets and `esptool` flash commands; see
+> [`firmware/README.md`](firmware/README.md). Remember the defaults above are baked in.
+
+### Step 5 — Wire the node to its Heltec and configure Meshtastic
+
+Three wires between the XIAO and the Heltec V3: XIAO TX → Heltec RX, XIAO RX ←
+Heltec TX, GND ↔ GND. The XIAO GPIOs depend on the firmware project — see the
+[wiring table](#wiring-for-mesh-integration). Power the Heltec from its own supply
+or the XIAO's 3.3 V/5 V pin as your build dictates.
+
+Flash stock [Meshtastic](https://meshtastic.org/) to the Heltec, then enable the
+**Serial Module** in text-message mode on the pins you wired (the reference build uses
+GPIO 19 / 20 on the Heltec):
+
+```bash
+meshtastic --set serial.enabled true \
+           --set serial.mode TEXTMSG \
+           --set serial.baud BAUD_115200 \
+           --set serial.rxd 19 --set serial.txd 20
+```
+
+Then **name the Meshtastic node.** Set its shortName (and/or longName) to the node's
+identity — for RX5808 nodes exactly the firmware `NODE_ID`, e.g. `RX01`:
+
+```bash
+meshtastic --set-owner "RX01" --set-owner-short "RX01"
+```
+
+`mesh-mapper.py` resolves a node's GPS by matching this name first and only falls back
+to the first GPS-equipped node in the mesh, so in a dense mesh a wrong name draws the
+range ring in the wrong place. All Heltecs must share the same channel and key.
+
+### Step 6 — Set up the home end
+
+1. Flash a XIAO ESP32-S3 with `node-mode-dualcore` → `home_node` (Steps 2–4).
+2. Wire it to the home Heltec (GPIO5 → Heltec RX, GPIO6 ← Heltec TX, GND) and
+   configure that Heltec's serial module exactly as in Step 5.
+3. Plug the home XIAO into the host machine over USB. It forwards deduplicated JSON
+   detections from the mesh to USB, and only forwards lines prefixed `MESH:` in the
+   other direction, so nothing the host emits can leak onto the mesh.
+
+An RX5808 node or a detection node can also be plugged **directly** into the host by
+USB for bench testing; the mapper reads the same JSON from either source.
+
+### Step 7 — Install and run the mapper
+
+```bash
+cd drone-mesh-5plus
+python3 -m pip install -r requirements.txt
+python3 mesh-mapper.py
+```
+
+Open **http://localhost:5000** (the server binds all interfaces, so any machine on the
+LAN can reach it on the host's IP). In the Settings panel select the home node's USB
+serial port; the mapper also auto-connects to remembered ports on later runs. For a
+Raspberry Pi collection point, clone the repo onto the Pi and add an `@reboot` cron
+entry that runs the command above.
+
+> The `RPI/` installer scripts are inherited from upstream and download upstream's
+> `mesh-mapper.py`, not this fork's. Use the clone above instead.
+
+### Step 8 — Smoke-test without hardware
+
+`mapper_test/mapper_test.py` simulates five drones and posts detections to the
+running mapper over HTTP, which is enough to verify the map, trails, history and
+exports before any node is in the field:
+
+```bash
+python3 mapper_test/mapper_test.py --host 127.0.0.1 --port 5000 --duration 5
+```
 
 ---
 
-## 📋 **Core Features**
+## 📦 **Firmware variants**
 
-### 🗺️ **Real-time Mapping**
-- **Live Detection Display**: Interactive map showing drone positions as they're detected
-- **Flight Path Tracking**: Visual trails showing drone and pilot movement over time
-- **Persistent Sessions**: Drones remain visible across application restarts
-- **Multi-device Support**: Handle multiple ESP32 receivers simultaneously
+All detection variants share the same parsers (`opendroneid.c`, `odid_wifi.h`,
+`bt_odid.h`, `dji_droneid.h`, `mavlink_wifi.h`) and emit the same JSON schema, so
+`mesh-mapper.py` treats them identically.
 
-### 📊 **Data Management**
-- **Detection History**: Complete log of all drone encounters with timestamps
-- **Device Aliases**: Assign friendly names to frequently seen drones
-- **Export Formats**: Download data as CSV, KML (Google Earth), or GeoJSON
-- **Cumulative Logging**: Long-term historical data storage
+| Project | Envs | Boards | Platform | What it is |
+|---------|------|--------|----------|------------|
+| `remoteid-c5-5g/` | `seeed_xiao_esp32c5`, `seeed_xiao_esp32s3` | C5, S3 | pioarduino 55.03.39 | **Current mainline.** Dual-band on C5, NimBLE + Coded PHY on both, full channel hopping. |
+| `node-mode-dualcore/` | `remote_node`, `home_node` | S3 | pioarduino 55.03.39 | Field node + the **home UART bridge** with 500 ms multi-node dedup. |
+| `remoteid-mesh-dualcore/` | `seeed_xiao_esp32s3` | S3 | pioarduino stable | S3 detection with Wi-Fi and BLE on separate cores. Classic BLE. |
+| `remoteid-mesh/` | `seeed_xiao_esp32s3`, `seeed_xiao_esp32c3` | S3, C3 | stock `espressif32` | Original single-core build. C3 has no BLE Remote ID. Legacy. |
+| `rx5808-detection/` | `seeed_xiao_esp32s3`, `seeed_xiao_esp32c5` | C5, S3 | pioarduino 55.03.39 | Analog 5.8 GHz FPV sweep with optional Heltec relay. |
 
-### 🔧 **ESP32 Integration**
-- **Auto-detection**: Automatically finds and connects to ESP32 devices
-- **Port Management**: Save and restore USB port configurations
-- **Status Monitoring**: Real-time connection health and data flow indicators
-- **Command Interface**: Send diagnostic commands to connected hardware
-
-### 🌐 **Web Interface**
-- **Real-time Updates**: WebSocket-powered live data streaming
-- **Mobile Responsive**: Works on desktop, tablet, and mobile devices
-- **Multiple Views**: Map, detection list, and device status panels
-- **Data Export**: Download detections directly from web interface
-
-### ⚙️ **Configuration & Monitoring**
-- **Headless Operation**: Run without web interface for dedicated deployments
-- **Debug Logging**: Detailed logging for troubleshooting and development
-- **Webhook Support**: External system integration via HTTP callbacks
+Prebuilt binaries for every env, the binary→env mapping, and `esptool` flashing are
+documented in [`firmware/README.md`](firmware/README.md). The node-mode home/remote
+pair and its dedup engine are described in
+[`node-mode-dualcore/README.md`](node-mode-dualcore/README.md).
 
 ---
 
-## 🚀 **Usage**
-
-### **Command Line Options**
+## 🚀 **Running the mapper**
 
 ```bash
 python3 mesh-mapper.py [OPTIONS]
@@ -240,130 +378,74 @@ python3 mesh-mapper.py [OPTIONS]
 | `--headless` | Run without web interface | false |
 | `--debug` | Enable debug logging | false |
 | `--web-port PORT` | Web interface port | 5000 |
-| `--port-interval SECONDS` | Port monitoring interval | 10 |
-| `--no-auto-start` | Disable automatic port connection | false |
+| `--port-interval SECONDS` | Serial port monitoring interval | 10 |
+| `--no-auto-start` | Disable automatic connection to remembered ports | false |
 | `--no-tak` | Disable TAK/ATAK CoT multicast output and receiver | false |
 | `--tak-addr ADDR` | TAK multicast address | 239.2.3.1 |
 | `--tak-port PORT` | TAK multicast port | 6969 |
 
-### **Examples**
-
 ```bash
-# Standard operation with web interface
-python3 mesh-mapper.py
-
-# Headless operation for dedicated server
-python3 mesh-mapper.py --headless --debug
-
-# Custom web port with verbose logging
-python3 mesh-mapper.py --web-port 8080 --debug
-
-# Disable auto-connection to saved ports
-python3 mesh-mapper.py --no-auto-start
+python3 mesh-mapper.py                          # web UI on :5000, TAK multicast on
+python3 mesh-mapper.py --headless --debug       # dedicated collection point, verbose log
+python3 mesh-mapper.py --web-port 8080 --no-tak # custom port, no CoT output
 ```
 
----
-
-
-
-## 🛠️ **API Reference**
-
-### **Core Endpoints**
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `GET` | `/` | Main web interface |
-| `GET` | `/api/detections` | Current active drone detections |
-| `POST` | `/api/detections` | Submit new detection data |
-| `GET` | `/api/detections_history` | Historical detection data (GeoJSON) |
-| `GET` | `/api/paths` | Flight path data for visualization |
-| `POST` | `/api/reactivate/<mac>` | Reactivate inactive drone detection |
-
-### **Device Management**
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `GET` | `/api/aliases` | Get device aliases |
-| `POST` | `/api/set_alias` | Set friendly name for device |
-| `POST` | `/api/clear_alias/<mac>` | Remove device alias |
-| `GET` | `/api/ports` | Available serial ports |
-| `GET` | `/api/serial_status` | ESP32 connection status |
-| `GET` | `/api/selected_ports` | Currently configured ports |
-
-### **External Integration**
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `POST` | `/api/set_webhook_url` | Configure webhook endpoint |
-| `GET` | `/api/get_webhook_url` | Get current webhook URL |
-| `POST` | `/api/webhook_popup` | Webhook notification handler |
-
-### **Data Export**
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `GET` | `/download/csv` | Download current detections (CSV) |
-| `GET` | `/download/kml` | Download current detections (KML) |
-| `GET` | `/download/aliases` | Download device aliases |
-| `GET` | `/download/cumulative_detections.csv` | Download full history (CSV) |
-| `GET` | `/download/cumulative.kml` | Download full history (KML) |
-
-### **RX5808 / TAK Integration**
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `GET/POST` | `/api/node_location` | Get or set manual GPS for an RX5808 node |
-| `GET/POST` | `/api/meshtastic_url` | Get or set Meshtastic HTTP API URL for a node |
-| `GET` | `/api/tak_contacts` | Current inbound ATAK/WinTAK/iTAK operator positions |
-
-### **System Management**
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `GET` | `/api/diagnostics` | System health and performance |
-| `POST` | `/api/debug_mode` | Toggle debug logging |
-| `POST` | `/api/send_command` | Send command to ESP32 devices |
-| `GET` | `/select_ports` | Port selection interface |
-| `POST` | `/select_ports` | Update port configuration |
-
-### **WebSocket Events**
-
-Real-time events pushed to connected clients:
-
-- `detections` - Full drone detection state (all tracked MACs)
-- `detection` - Single detection update (real-time, per-event)
-- `paths` - Updated flight path data
-- `serial_status` - ESP32 connection status changes
-- `aliases` - Device alias updates
-- `cumulative_log` - Historical data updates
-- `tak_contact` - Inbound ATAK/WinTAK/iTAK operator position (lat/lon/callsign/type)
+**What you get:** a live Leaflet map with drone and pilot markers and trails,
+persistent detections across restarts, a no-GPS panel for detections without a fix,
+device aliases, FAA registration lookup for Remote ID serials, CSV / KML / GeoJSON
+export, a cumulative detection log, webhook callbacks, and a Cursor-on-Target feed
+that ATAK / WinTAK / iTAK pick up over multicast. Runtime output lands in
+`mapper.log`, `cumulative_detections.csv`, `cumulative.kml` and per-session
+`detections_*.csv|kml` files next to the script (all git-ignored).
 
 ---
 
 ## 🔧 **Hardware Setup**
 
-### **Supported ESP32 Boards**
-- ✅ **XIAO ESP32-S3** (dual-core, Wi-Fi + BLE) — primary detection node
-- ✅ **XIAO ESP32-C5** (dual-band 2.4 + 5 GHz Wi-Fi, BLE 5.0 + Coded PHY long range) — primary detection node
-- ✅ **XIAO ESP32-C3** (single-core, Wi-Fi only — legacy; no BLE Remote ID)
-- ✅ **ESP32-DevKit** (development and testing)
-- ✅ **Custom PCBs** (see Tindie store link below)
+### Supported boards
 
-### **Wiring for Mesh Integration**
-```
-ESP32 Pin | Mesh Radio Pin
-----------|---------------
-TX1 (d4)  | RX 19
-RX1 (d5)  | TX 20
-3.3V      | VCC
-GND       | GND
-```
+| Board | Status | Notes |
+|-------|--------|-------|
+| **Seeed XIAO ESP32-C5** | ✅ Primary | Dual-band 2.4 + 5 GHz Wi-Fi 6, BLE 5 with Coded PHY long range. Single RISC-V core. |
+| **Seeed XIAO ESP32-S3** | ✅ Primary | 2.4 GHz Wi-Fi, BLE 5 (Coded PHY in the NimBLE build), dual core, PSRAM. |
+| **Seeed XIAO ESP32-C3** | ⚠️ Legacy | `remoteid-mesh` only. Single core, Wi-Fi only, no BLE Remote ID. |
+| **Heltec WiFi LoRa 32 V3** | ✅ Mesh radio | Runs stock Meshtastic; one per node plus one at home. |
+
+### Wiring for mesh integration
+
+Three wires per node. The UART GPIOs are fixed in each firmware project, so wire to
+match the project you flashed. XIAO silkscreen labels are given in brackets.
+
+| Firmware | Board | XIAO TX → Heltec RX | XIAO RX ← Heltec TX |
+|----------|-------|---------------------|---------------------|
+| `remoteid-c5-5g` | ESP32-S3 | GPIO5 (D4) | GPIO6 (D5) |
+| `remoteid-c5-5g` | ESP32-C5 | GPIO5 (D3) | GPIO6 (D4) |
+| `node-mode-dualcore` (remote and home) | ESP32-S3 | GPIO5 (D4) | GPIO6 (D5) |
+| `remoteid-mesh-dualcore` | ESP32-S3 | GPIO5 (D4) | GPIO6 (D5) |
+| `remoteid-mesh` | ESP32-S3 | GPIO6 (D5) | GPIO7 (D8) |
+| `remoteid-mesh` | ESP32-C3 | GPIO6 (D4) | GPIO7 (D5) |
+| `rx5808-detection` | ESP32-S3 | GPIO5 (D4) | GPIO6 (D5) |
+| `rx5808-detection` | ESP32-C5 | GPIO6 (D4) | GPIO7 (D5) |
+
+Plus **GND ↔ GND**. On the Heltec side use whichever free GPIOs you configured as
+`serial.rxd` / `serial.txd` in Meshtastic (19 / 20 in the reference build). The
+`remoteid-c5-5g` build prints its `UART: TX=GPIOx, RX=GPIOy → Heltec` line at boot;
+for the others the `SERIAL1_TX_PIN` / `SERIAL1_RX_PIN` constants near the top of the
+project's `main.cpp` are the authority.
+
+### Meshtastic node naming
+
+`mesh-mapper.py` learns where a node is from the Meshtastic HTTP API
+(`/api/meshtastic_url`) or from manual coordinates (`/api/node_location`). When it
+polls Meshtastic it looks for a node whose **shortName or longName matches the
+firmware node id** (case-insensitive) and only falls back to the first GPS-equipped
+node if nothing matches. Name every Heltec after the node it is wired to.
 
 ---
 
 ## 🚁 **DJI DroneID Parsing** (`src/dji_droneid.h`)
 
-All four firmware variants (`remoteid-mesh`, `node-mode-dualcore`, `remoteid-mesh-dualcore`, `remoteid-c5-5g`) now decode DJI's proprietary Wi-Fi DroneID alongside the existing ASTM/OpenDroneID path.
+All four firmware variants (`remoteid-mesh`, `node-mode-dualcore`, `remoteid-mesh-dualcore`, `remoteid-c5-5g`) decode DJI's proprietary Wi-Fi DroneID alongside the existing ASTM/OpenDroneID path.
 
 ### How it works
 
@@ -375,7 +457,7 @@ The parser in `src/dji_droneid.h` is a header-only C implementation. The byte la
 
 ### IE walk integration
 
-Inside the 802.11 beacon frame handler in `main.cpp`, the tag-221 walk now checks OUI `26:37:12` *before* the existing OpenDroneID OUIs. A successful parse calls `dji_parse_droneid()` then `dji_emit_json()`, emitting one JSON line per detected frame. The OpenDroneID branch (`FA:0B:BC` / `90:3A:E6`) is unchanged. Both branches share a hardened while loop with explicit bounds guards:
+Inside the 802.11 beacon frame handler in `main.cpp`, the tag-221 walk checks OUI `26:37:12` *before* the existing OpenDroneID OUIs. A successful parse calls `dji_parse_droneid()` then `dji_emit_json()`, emitting one JSON line per detected frame. The OpenDroneID branch (`FA:0B:BC` / `90:3A:E6`) is unchanged. Both branches share a hardened while loop with explicit bounds guards:
 
 ```c
 while (offset + 1 < length) {
@@ -487,7 +569,7 @@ report a signal hit whenever RSSI exceeds your calibrated threshold.
 
 | Component | Notes |
 |-----------|-------|
-| **Seeed XIAO ESP32-S3** or **XIAO ESP32-C5** | Choose one; firmware auto-detects |
+| **Seeed XIAO ESP32-S3** or **XIAO ESP32-C5** | Choose one; the firmware picks the pinout at compile time |
 | **RX5808 module** | 5.8GHz analog FM receiver; ~$5–10, widely available |
 | Jumper wires | 4 signal + 2 power wires |
 
@@ -515,11 +597,8 @@ The firmware selects GPIO numbers automatically at compile time based on the tar
 
 ### Prerequisites
 
-[PlatformIO](https://platformio.org/) must be installed. The quickest path:
-
-```bash
-pip install platformio          # or install via VS Code PlatformIO extension
-```
+The VS Code + pioarduino toolchain from [Quick Start Step 1](#step-1--install-the-toolchain-vs-code--pioarduino),
+or the PlatformIO CLI. Open the `rx5808-detection/` folder as the project.
 
 ### Full Flashing Steps
 
@@ -545,6 +624,8 @@ Open `rx5808-detection/src/rx5808.h`. The default of `600` is a safe starting po
 See the wiring table above. Connect the XIAO to your computer via USB-C.
 
 **Step 4 — Flash**
+
+In VS Code: PlatformIO → Project Tasks → `seeed_xiao_esp32s3` or `seeed_xiao_esp32c5` → **Upload**. Or from the CLI:
 
 ```bash
 cd rx5808-detection
@@ -575,35 +656,14 @@ If nothing appears for >5 s, check USB-CDC enumeration: the XIAO waits up to 3 s
 
 With no FPV transmitter powered:
 1. Watch the monitor for 30 seconds. Any `rssi_raw` values that appear are your **noise floor**.
-2. Set `RSSI_THRESHOLD` to (noise floor + 200) in `rx5808.h`.
+2. Set `RSSI_THRESHOLD` to (noise floor + 200) in `rx5808.h`. Higher values reduce false positives at the cost of missing weaker signals.
 3. Reflash (Step 4). Power a known FPV transmitter nearby and confirm detections.
 
 **Step 7 — Connect to mesh-mapper**
 
 1. Start `mesh-mapper.py` on your server machine.
-2. In the web UI Settings panel, select the XIAO's USB serial port.
+2. In the web UI Settings panel, select the XIAO's USB serial port (or let it arrive over the mesh via the home node).
 3. For range-ring display: set the node's Meshtastic URL or manual coordinates (see Integration section below).
-
-### Build & Flash (quick reference)
-
-```bash
-cd rx5808-detection
-
-# --- XIAO ESP32-S3 ---
-pio run -e seeed_xiao_esp32s3                          # compile only
-pio run -e seeed_xiao_esp32s3 --target upload          # compile + flash
-pio device monitor --baud 115200                       # open serial monitor
-
-# --- XIAO ESP32-C5 ---
-pio run -e seeed_xiao_esp32c5                          # compile only
-pio run -e seeed_xiao_esp32c5 --target upload          # compile + flash
-pio device monitor --baud 115200
-```
-
-On power-up you should see on the serial monitor:
-```json
-{"info":"RX5808 scanner ready","node_id":"RX01","channels":40,"threshold":600}
-```
 
 ### Configuration
 
@@ -618,15 +678,6 @@ All tuneable constants are at the top of the relevant source files:
 | `ENABLE_MESH_RELAY` | `src/main.cpp` | `1` | Set `0` to disable Heltec UART relay |
 | `MIN_DWELL_HITS` | `src/main.cpp` | `2` | Both reads must clear threshold to confirm a hit |
 | `REPORT_INTERVAL_MS` | `src/main.cpp` | `5000` | Rate-limit re-reports of the same channel (ms) |
-
-### Calibrating the RSSI Threshold
-
-1. Flash the firmware and open the serial monitor.
-2. With **no FPV transmitter powered on**, let it scan for ~30 seconds and note
-   the `rssi_raw` values in any detections.  That is your **noise floor**.
-3. Set `RSSI_THRESHOLD` to **noise floor + 200** (at minimum).  Higher values
-   reduce false positives at the cost of missing weaker signals.
-4. Re-flash, power up a known FPV transmitter nearby, and confirm detections appear.
 
 ### Detection Output
 
@@ -702,61 +753,141 @@ All 40 channels scanned per cycle:
 
 ---
 
-## 📊 **Performance**
+## 🛠️ **API Reference**
 
-| Metric | Performance |
-|--------|-------------|
-| **Detection Latency** | < 500ms average |
-| **Concurrent Drones** | 50+ simultaneous |
-| **Memory Usage** | < 100MB typical |
-| **Storage Efficiency** | ~1KB per detection |
-| **Network Throughput** | 1000+ detections/min |
+### **Core Endpoints**
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/` | Main web interface |
+| `GET` | `/api/detections` | Current active drone detections |
+| `POST` | `/api/detections` | Submit new detection data |
+| `GET` | `/api/detections_history` | Historical detection data (GeoJSON) |
+| `GET` | `/api/paths` | Flight path data for visualization |
+| `POST` | `/api/reactivate/<mac>` | Reactivate inactive drone detection |
+
+### **Device Management**
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/aliases` | Get device aliases |
+| `POST` | `/api/set_alias` | Set friendly name for device |
+| `POST` | `/api/clear_alias/<mac>` | Remove device alias |
+| `GET` | `/api/ports` | Available serial ports |
+| `GET` | `/api/serial_status` | ESP32 connection status |
+| `GET` | `/api/selected_ports` | Currently configured ports |
+
+### **External Integration**
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/api/set_webhook_url` | Configure webhook endpoint |
+| `GET` | `/api/get_webhook_url` | Get current webhook URL |
+| `POST` | `/api/webhook_popup` | Webhook notification handler |
+
+### **Data Export**
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/download/csv` | Download current detections (CSV) |
+| `GET` | `/download/kml` | Download current detections (KML) |
+| `GET` | `/download/aliases` | Download device aliases |
+| `GET` | `/download/cumulative_detections.csv` | Download full history (CSV) |
+| `GET` | `/download/cumulative.kml` | Download full history (KML) |
+
+### **RX5808 / TAK Integration**
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET/POST` | `/api/node_location` | Get or set manual GPS for an RX5808 node |
+| `GET/POST` | `/api/meshtastic_url` | Get or set Meshtastic HTTP API URL for a node |
+| `GET` | `/api/tak_contacts` | Current inbound ATAK/WinTAK/iTAK operator positions |
+
+### **System Management**
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/diagnostics` | System health and performance |
+| `POST` | `/api/debug_mode` | Toggle debug logging |
+| `POST` | `/api/send_command` | Send command to ESP32 devices |
+| `GET` | `/select_ports` | Port selection interface |
+| `POST` | `/select_ports` | Update port configuration |
+
+### **WebSocket Events**
+
+Real-time events pushed to connected clients:
+
+- `detections` - Full drone detection state (all tracked MACs)
+- `detection` - Single detection update (real-time, per-event)
+- `paths` - Updated flight path data
+- `serial_status` - ESP32 connection status changes
+- `aliases` - Device alias updates
+- `cumulative_log` - Historical data updates
+- `tak_contact` - Inbound ATAK/WinTAK/iTAK operator position (lat/lon/callsign/type)
 
 ---
 
 ## 🐛 **Troubleshooting**
 
-### **Common Issues**
+**Build fails or the C5 env is missing**
+- Make sure the *pioarduino IDE* extension (or a recent PlatformIO CLI) is in use and
+  the project folder, not the repo root, is open. The platform is pinned by URL in
+  `platformio.ini`; delete the project's `.pio/` folder to force a clean re-download.
 
-**ESP32 Not Detected**
+**Upload cannot connect**
+- On the ESP32-C5: hold **BOOT**, tap **RESET**, release **BOOT**, retry.
+- On Linux check the udev rules and `dialout` membership from Quick Start Step 1, then
+  `ls /dev/ttyACM* /dev/ttyUSB*`.
+- With several boards attached set `upload_port` in `platformio.ini`.
+
+**Node boots but scans few channels**
+- `channel N rejected by regulatory domain` on the monitor means
+  `WIFI_CHAN_START`/`WIFI_CHAN_COUNT` exclude a channel in the scan list. Fix the
+  defines and rebuild. See [Regulatory domain](#regulatory-domain).
+
+**Detections reach the mapper but the RX5808 range ring is missing or misplaced**
+- The Meshtastic node's shortName/longName must equal the firmware `NODE_ID`; otherwise
+  the mapper falls back to the first GPS node in the mesh. Or set coordinates by hand via
+  `/api/node_location`.
+
+**No serial data at the host**
+- `mesh-mapper.py --debug` and watch `mapper.log`. Confirm the home node's port is
+  selected in Settings (`/api/serial_status`). Confirm the Heltec serial module is in
+  `TEXTMSG` mode at 115200 on the wired pins, and that TX/RX are crossed.
+
+**Web interface not loading**
 ```bash
-# Check USB connection
-ls -la /dev/tty* | grep USB
-
-# Verify driver installation  
-dmesg | grep tty
+ss -tlnp | grep :5000      # is the server listening?
+tail -f mapper.log
 ```
 
-**Web Interface Not Loading**
-```bash
-# Check if service is running
-netstat -tlnp | grep :5000
-
-# Review logs
-tail -f mesh-mapper.log
-```
-
-**No Drone Detections**
-- Verify ESP32 firmware is properly flashed
-- Check the scan schedule in `channelHopTask` (see [Channel scanning](#-channel-scanning))
-- Ensure drones are transmitting Remote ID (required in many jurisdictions)
+**No drone detections at all**
+- Verify the node is flashed with a detection build, not `home_node`, and prints its
+  startup banner on the serial monitor at 115200.
+- Confirm the aircraft actually broadcasts something in the
+  [protocol coverage](#protocol-coverage) table; OcuSync-only DJI models are invisible
+  to an ESP32.
+- Run `mapper_test/mapper_test.py` to prove the mapper side end-to-end.
 
 ---
 
 ## 📄 **License**
 
-This project is licensed under the MIT License 
+This project is licensed under the MIT License, as is the upstream project it is
+derived from.
 
 ---
 
 ## 🙏 **Acknowledgments**
 
+- **ColonelPanic** and **Luke Switzer** — the original
+  [drone-mesh-mapper](https://github.com/colonelpanichacks/drone-mesh-mapper)
 - **Cemaxacutor**
-- **ColonelPanic**
-- **Luke Switzer**
 - **"Alik",** 93rd OMBr, Armed Forces of Ukraine
 - **"Ivan",** 427th Rarog, Armed Forces of Ukraine
-- **OpenDroneID Community** - Standards and specifications
+- **OpenDroneID Community** — standards and reference implementation
+- **Kismet** (Freek van Tienen & Jan Dumon) — DJI DroneID IE layout
+- **pioarduino** — the maintained Arduino-ESP32 platform for PlatformIO that makes the C5 build possible
 - Thank you PCBway for the awesome boards! The combination of their top tier quality, competitive pricing, fast turnaround times, and stellar customer service makes PCBWay the go-to choice for professional PCB fabrication, whether you're prototyping innovative mesh detection systems or scaling up for full production runs.
 https://www.pcbway.com/
   <div align="center"> <img src="boards.png" alt="boards" style="width:50%; height:25%;">
@@ -766,9 +897,9 @@ https://www.pcbway.com/
 
 ## 🛒 **Hardware Store**
 
-Get professional PCBs from ColonelPanic's store: 
+Get professional PCBs from ColonelPanic's store:
 https://colonelpanic.tech
 
 Made with ❤️ by the Drone Detection Community
 
-</div> 
+</div>
