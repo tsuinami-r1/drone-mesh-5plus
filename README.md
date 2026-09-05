@@ -702,6 +702,21 @@ All 40 channels scanned per cycle:
 
 ---
 
+## 📱 **iOS companion** (`ios-mapper/`, prototype)
+
+A SwiftUI port of the mapper for the field: the iPhone connects **directly to a
+Meshtastic radio over Bluetooth**, parses the same mesh alerts the nodes already
+send (`Drone:`, `Pilot[…]:`, `DJI …`, `AnalogFM: …`, and the node-mode JSON), and
+shows them on a MapKit map with pilot markers, tracks and analog range rings.
+Detections raise time-sensitive notifications and keep arriving while the app is
+in the background (`bluetooth-central` mode + CoreBluetooth state restoration +
+persistent reconnect). No laptop, no home node on USB.
+
+See [`ios-mapper/README.md`](ios-mapper/README.md) for building (XcodeGen),
+pairing, background behaviour and the list of what is not ported yet.
+
+---
+
 ## 📊 **Performance**
 
 | Metric | Performance |

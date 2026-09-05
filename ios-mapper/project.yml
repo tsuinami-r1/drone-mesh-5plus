@@ -1,0 +1,83 @@
+# XcodeGen spec — run `xcodegen generate` in this directory to produce
+# MeshMapper.xcodeproj (the project file is not checked in).
+name: MeshMapper
+options:
+  bundleIdPrefix: org.dronemesh
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+  generateEmptyDirectories: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    TARGETED_DEVICE_FAMILY: "1"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    # Set your Apple Developer team here, or in Xcode's Signing & Capabilities.
+    # DEVELOPMENT_TEAM: XXXXXXXXXX
+
+targets:
+  MeshMapper:
+    type: application
+    platform: iOS
+    sources:
+      - path: MeshMapper
+        excludes:
+          - "Info.plist"
+          - "MeshMapper.entitlements"
+    info:
+      path: MeshMapper/Info.plist
+      properties:
+        CFBundleDisplayName: Mesh Mapper
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        ITSAppUsesNonExemptEncryption: false
+        # Keeps the BLE link to the Meshtastic radio alive while suspended and
+        # lets iOS relaunch the app on incoming packets (state restoration).
+        UIBackgroundModes:
+          - bluetooth-central
+        NSBluetoothAlwaysUsageDescription: >-
+          Mesh Mapper connects to your Meshtastic radio over Bluetooth to
+          receive drone detection alerts from the mesh, including in the background.
+        NSLocationWhenInUseUsageDescription: >-
+          Your position is shown on the map and used to compute the distance
+          to detected drones and pilots.
+    entitlements:
+      path: MeshMapper/MeshMapper.entitlements
+      properties:
+        # Lets detection alerts break through Focus modes as time-sensitive.
+        com.apple.developer.usernotifications.time-sensitive: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: org.dronemesh.meshmapper
+        ENABLE_PREVIEWS: YES
+
+  MeshMapperTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: MeshMapperTests
+    dependencies:
+      - target: MeshMapper
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: org.dronemesh.meshmapper.tests
+
+schemes:
+  MeshMapper:
+    build:
+      targets:
+        MeshMapper: all
+        MeshMapperTests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - MeshMapperTests

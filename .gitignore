@@ -9,6 +9,13 @@
 
 *.vscode/
 
+# iOS prototype: everything XcodeGen derives from ios-mapper/project.yml
+ios-mapper/*.xcodeproj/
+ios-mapper/MeshMapper/Info.plist
+ios-mapper/MeshMapper/MeshMapper.entitlements
+ios-mapper/**/xcuserdata/
+ios-mapper/DerivedData/
+
 # Python bytecode
 __pycache__/
 *.py[cod]
