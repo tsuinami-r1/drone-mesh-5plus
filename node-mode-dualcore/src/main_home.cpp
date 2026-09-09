@@ -228,6 +228,17 @@ static void processJsonLine(const char* line, int len) {
     return;
   }
 
+  // Level 1 analog FM lines are NOT duplicates of one event: every station
+  // reports its own RSSI of the same channel (same synthetic MAC), and the
+  // mapper fuses those per-station readings into a position. They are already
+  // rate-limited at the station, so bypass the MAC dedup entirely.
+  if (strstr(line, "\"analog_fm\"") != NULL) {
+    Serial.println(line);
+    msgForwarded++;
+    ledFlash();
+    return;
+  }
+
   extractJsonString(line, "node_id", nodeIdBuf, sizeof(nodeIdBuf));
   msgReceived++;
 

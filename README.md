@@ -612,14 +612,21 @@ over USB or via the home node from the mesh. **Keep this table and the
 ```json
 {
   "type":     "analog_fm",
+  "receiver": "rx5808",
   "mac":      "AF:00:16:1A:52:01",
   "freq_mhz": 5658,
   "band":     "R",
   "ch":       1,
   "rssi_raw": 850,
   "rssi":     850,
+  "rssi_mv":  643,
+  "rssi_dbm": -72.7,
+  "rssi_min": 812,
+  "rssi_max": 891,
+  "rssi_n":   20,
   "basic_id": "5.8G-R1-5658MHz",
-  "node_id":  "RX01"
+  "node_id":  "RX01",
+  "seq":      42
 }
 ```
 
@@ -627,19 +634,65 @@ over USB or via the home node from the mesh. **Keep this table and the
 |-----|----------|------------|
 | `type` | yes, must be `"analog_fm"` | Routes the line around every Remote ID code path: no FAA lookup (`_skip_faa`), no drone/pilot markers, not appended to `detection_history`, 30 s stale timeout in `cleanup_old_detections()`, `ANALOGFM-` sensor marker + range-ring CoT events |
 | `mac` | yes | Tracking key. Synthetic, locally-administered `AF:00:` prefix + frequency (big-endian MHz) + band ASCII + channel, so every channel is its own "device" and never collides with a real Wi-Fi MAC |
-| `node_id` | yes | Looks up the station position in `NODE_LOCATIONS` and draws the ring there. Must equal the paired Meshtastic node's shortName/longName |
-| `freq_mhz`, `band`, `ch` | yes | Popup, log line, CoT callsign |
-| `rssi_raw` | yes | Range estimate (`_rssi_to_max_range_m`, free-space path loss at 5.8 GHz) and ring colour (green ≥ 1000, amber ≥ 800, red below, RX5808 ADC counts) |
-| `rssi` | yes (duplicate of `rssi_raw`) | Generic RSSI display shared with Level 2 detections |
-| `basic_id` | yes | Human-readable label in the detection list |
+| `node_id` | yes | Looks up the station position in `NODE_LOCATIONS` and draws the ring there; keys the station's liveness in `NODE_STATUS`. Must equal the paired Meshtastic node's shortName/longName |
+| `freq_mhz`, `band`, `ch` | yes | Popup, log line, CoT callsign, frequency-derived path-loss constant, emitter clustering (`ANALOG_CLUSTER_MHZ`) |
+| `rssi_raw` | yes | Raw ADC count. Only the fallback for `rssi_dbm` (`_rssi_raw_to_dbm`, RX5808 curve: 0–1320 counts ≈ −95…−20 dBm) and for ring colour |
+| `rssi` | no (backfilled from `rssi_raw`) | Generic RSSI display shared with Level 2 detections, CSV |
+| `basic_id` | no (backfilled from `receiver`/band/ch/freq) | Human-readable label, CoT callsign |
+| `receiver` | no (defaults to `rx5808`) | Log tag, popup, `basic_id` prefix (`5.8G` / `3.3G`) |
+| `rssi_dbm` | no, but needed for fixes | Calibrated received power. Ring radius (`_max_range_m`, FSPL at `freq_mhz`, assumed `DEFAULT_TX_DBM`), ring colour (green ≥ −60, amber ≥ −75, red below) and the multi-station solver. The mapper attaches `rssi_dbm` + `dbm_source` (`firmware`/`mapper`) to every analog detection it emits |
+| `rssi_mv`, `rssi_n`, `seq` | no | Popup / diagnostics |
+| `rssi_min`, `rssi_max` | no | Sample spread; the solver down-weights noisy reports |
 
-Planned additive keys for the RX3364 (`receiver`, `rssi_dbm`) and the mapper edits
-they need are specified in the `level1-station` branch under
-`docs/RX3364-INTEGRATION-PLAN.md`; a detection without them must keep working
-unchanged.
+The compact **mesh relay** copy of this line carries only `type`, `mac`,
+`freq_mhz`, `band`, `ch`, `rssi_raw`, `rssi_dbm`, `rssi_min`, `rssi_max`,
+`node_id`, `seq` (≤ 190 bytes for the LoRa payload); the home node forwards
+Level 1 JSON without MAC dedup, and `_analog_normalise()` backfills the rest. A
+detection carrying only the pre-`rssi_dbm` keys must keep rendering a ring.
 
 Status lines carrying `heartbeat`, `status` or `info` and none of the detection keys
-are dropped by the serial reader and never create a device.
+are dropped by the serial reader and never create a device. Level 1 heartbeats are
+first recorded in `NODE_STATUS` (`_analog_note_node`): `node_id`, `threshold_dbm`,
+`receiver`, `temp_c`, `uptime_s`. A station with a heartbeat or detection within
+`ANALOG_NODE_ALIVE_S` (300 s) is *alive*.
+
+```json
+{"heartbeat":true,"node_id":"RX01","receiver":"rx5808","scanning":true,"channels":40,"threshold":600,"threshold_dbm":-94.5,"temp_c":41.2,"uptime_s":3600,"seq":42}
+```
+
+### Multi-station fixes (differential-RSSI multilateration)
+
+One station's RSSI cannot give a distance because the transmitter power is
+unknown; several stations can. `_analog_refresh_fixes()` runs after every analog
+detection:
+
+1. Live observations (≤ `ANALOG_FUSION_WINDOW_S` = 25 s old) are clustered by
+   frequency; reports within `ANALOG_CLUSTER_MHZ` = 20 MHz are one emitter, so two
+   stations peak-picking adjacent channels (R3 5732 / B1 5733) still fuse.
+2. For each cluster with ≥ 2 positioned stations, `_analog_solve()` grid-searches
+   the emitter position under the log-distance model
+   `p_i = P0 − 10·n·log10(d_i)` (`ANALOG_PATH_LOSS_EXP` = 2.3). `P0` has a
+   closed form at every candidate, so the unknown TX power cancels. Every
+   alive-but-silent positioned station adds a one-sided penalty ("predicted power
+   here must be below `threshold_dbm` + `ANALOG_SILENT_MARGIN_DB`"), which is
+   what lets a dense field of nodes narrow a fix from only two positives. A
+   plausible VTX power prior (`ANALOG_TX_MIN/MAX_DBM`, 10 mW…5 W) bounds the
+   "far away and very strong" family of solutions.
+3. Every coarse local minimum is refined (symmetric layouts have mirror
+   solutions); the 90 % region around the best point gives `err_m`, `bounded`,
+   and `ambiguous` + `alt` when a second basin survives.
+4. Result: `ANALOG_FIXES[fix_id]` with `lat`, `lon`, `err_m`, `quality`
+   (`good` ≤ 300 m, `fair` ≤ 1000 m, else `poor`), `tx_dbm_est`, `nodes`,
+   `silent_nodes`, `macs`; participating detections get `fix_id`/`fix_lat`/
+   `fix_lon`/`fix_err_m`/`fix_quality`; `socketio` event `analog_fix`; CoT
+   `ANALOGFIX-…` marker + confidence circle (poor fixes are not sent).
+
+The UI draws a 🎯 marker, a 90 % circle and spokes to the contributing stations
+for `good`/`fair` fixes (`updateAnalogFixes()` polls `/api/analog_fixes`), and a
+faint ❔ at the mirror solution when one cannot be excluded. Tune live with
+`POST /api/analog_fusion` (`path_loss_exp`, `sigma_db`, `silent_margin_db`,
+`window_s`, `cluster_mhz`). `mapper_test/analog_fusion_test.py` exercises the
+whole path offline.
 
 ### What appears in the UI
 
@@ -665,9 +718,9 @@ POST /api/node_location  { "node_id": "RX01", "lat": 25.7617, "lon": -80.1918 }
 ```
 
 Differences from Level 2 (Remote ID) detections:
-- `type: "analog_fm"` is logged at INFO level with band/channel/RSSI.
-- Range rings are colored by signal strength: green ≥ 1000, amber ≥ 800, red below (within the RX5808's ~0–1320 ADC-count range).
-- Each detection is also forwarded to ATAK/WinTAK as two CoT events: an `a-u-G-E-S` sensor marker and a `u-r-b-c-c` range ring shape.
+- `type: "analog_fm"` is logged at INFO level with band/channel/RSSI/dBm.
+- Range rings are colored by received power: green ≥ −60 dBm, amber ≥ −75 dBm, red below (raw-count thresholds 1000/800 only when no dBm is available).
+- Each detection is also forwarded to ATAK/WinTAK as two CoT events: an `a-u-G-E-S` sensor marker and a `u-r-b-c-c` range ring shape; multi-station fixes add an `a-u-A-M-F-U-M` marker and a confidence circle.
 - A station silent for 30 s is marked inactive (Level 2 detections get 3 min).
 
 ---
@@ -720,6 +773,9 @@ Differences from Level 2 (Remote ID) detections:
 |--------|----------|-------------|
 | `GET/POST` | `/api/node_location` | Get or set manual GPS for a Level 1 station |
 | `GET/POST` | `/api/meshtastic_url` | Get or set Meshtastic HTTP API URL for a node |
+| `GET` | `/api/analog_fixes` | Multi-station analog FM position fixes (`fix_id` → lat/lon/err_m/quality/nodes) |
+| `GET` | `/api/analog_nodes` | Every Level 1 station heard: alive, threshold_dbm, temp, position |
+| `GET/POST` | `/api/analog_fusion` | Read or tune the solver (`path_loss_exp`, `sigma_db`, `silent_margin_db`, `window_s`, `cluster_mhz`) |
 | `GET` | `/api/tak_contacts` | Current inbound ATAK/WinTAK/iTAK operator positions |
 
 ### **System Management**

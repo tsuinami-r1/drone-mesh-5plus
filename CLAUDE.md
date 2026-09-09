@@ -21,7 +21,8 @@
    (popup logic, FAA lookup, isNoGpsDrone, etc.)
 4. If the mapper's handling of `analog_fm` detections changed, confirm a detection
    carrying only the keys in the Level 1 contract still renders a ring (Level 1
-   stations in the field are not reflashed when the mapper updates)
+   stations in the field are not reflashed when the mapper updates) and run
+   `python3 mapper_test/analog_fusion_test.py`
 
 ## Deployment context
 
@@ -48,8 +49,17 @@
   drone/pilot GPS, and render as range rings + 📡 markers via `analogFmRings` /
   `analogFmMarkers`
 - `isNoGpsDrone` must always carry `&& det.type !== 'analog_fm'` guard
-- Range estimation (`_rssi_raw_to_dbm`, `_FSPL_5800_DB`) and ring colour thresholds
-  (`rfRssiToColor`) currently assume RX5808 ADC counts and 5.8 GHz; the RX3364 plan on
-  `level1-station` (`docs/RX3364-INTEGRATION-PLAN.md`) specifies the additive
-  `receiver` / `rssi_dbm` keys and the frequency-derived FSPL that replace those
-  assumptions without breaking existing stations
+- Analog range/colour run on dBm: `_analog_normalise()` attaches `rssi_dbm` (firmware
+  value, else `_rssi_raw_to_dbm` RX5808 fallback: 0–1320 counts ≈ −95…−20 dBm) and
+  `_max_range_m()` uses `_fspl_const_db(freq_mhz)`; `rfRssiToColor(det)` colours on
+  −60/−75 dBm. Never reintroduce raw-count assumptions: counts differ between the
+  S3 and C5 ADCs
+- Multi-station fusion: `ANALOG_OBS` (per mac, per node) → `_analog_refresh_fixes()`
+  (frequency clustering, `_analog_solve()` grid search with closed-form TX power,
+  silent-station penalties, mirror-basin detection) → `ANALOG_FIXES`, `analog_fix`
+  socket event, `/api/analog_fixes`, `_tak_enqueue_fix()`. `NODE_STATUS` (own lock)
+  holds liveness + `threshold_dbm` from heartbeats; the serial reader must call
+  `_analog_note_node()` on a Level 1 heartbeat *before* dropping it
+- Run `python3 mapper_test/analog_fusion_test.py` after touching anything analog
+- Home node (`node-mode-dualcore/src/main_home.cpp`) forwards `"analog_fm"` lines
+  without MAC dedup: several stations legitimately report the same synthetic MAC
