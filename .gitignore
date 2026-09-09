@@ -1,21 +1,11 @@
-
 *.DS_Store
 
-# PlatformIO build output and downloaded lib dependencies.
-# Covers every firmware project (.pio/build, .pio/libdeps, ...); the previous
-# "*.pio/build/" pattern missed libdeps and the projects without their own
-# .gitignore (remoteid-c5-5g, rx5808-detection).
+# PlatformIO build output and downloaded lib dependencies
+# (.pio/build, .pio/libdeps, ...) for every firmware project on this branch.
 .pio/
 
 *.vscode/
 
-# Python bytecode
+# Python bytecode (bench/helper scripts)
 __pycache__/
 *.py[cod]
-
-# mesh-mapper.py runtime output (per-session logs, exports and KML)
-mapper.log
-cumulative.kml
-cumulative_detections.csv
-detections_*.csv
-detections_*.kml
