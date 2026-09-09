@@ -33,14 +33,23 @@ firmware and the home node live on `main` and must not be copied here.
   timeout, range ring + 📡 marker, `ANALOGFM-` CoT uids)
 - `mac` is synthetic, `AF:00:` + freq hi/lo + band ASCII + channel; it is the
   tracking key, so it must be stable per channel and unique across receivers
-- `rssi_raw` drives range estimation and ring colour on the mapper with RX5808
-  ADC-count assumptions (0–1320 range, colour steps 800/1000); a new receiver with a
-  different RSSI curve needs the contract additions in
-  `docs/RX3364-INTEGRATION-PLAN.md` (`receiver`, `rssi_dbm`) rather than reusing
-  those thresholds
+- `rssi_dbm` (calibrated in firmware from `rssi_mv` via the `RSSI_CAL_*` line) is what
+  the mapper uses for the ring radius, ring colour (−60/−75 dBm) and the
+  multi-station position solver; `rssi_raw` is only the mapper's fallback for
+  pre-`rssi_dbm` stations (RX5808 curve, 0–1320 counts). Raw counts are not comparable
+  between an S3 and a C5; never make the mapper depend on them again
+- `rssi_min`/`rssi_max`/`rssi_n`/`seq`/`receiver`/`rssi_mv` are additive; the mesh line
+  drops `rssi`, `basic_id`, `receiver`, `rssi_mv`, `rssi_n` and the mapper backfills them
+- The mesh relay line **must be JSON** and ≤ ~190 bytes: the home node forwards JSON
+  unchanged (analog_fm bypasses its MAC dedup) and tags anything else `[MESH]`, which
+  the mapper drops. Rate-limit it with `MESH_REPORT_INTERVAL_MS`; LoRa airtime is the
+  scarce resource in a dense deployment
 - Heartbeat/info lines must carry `heartbeat`, `status` or `info` and none of
   `mac`/`drone_lat`/`pilot_lat`/`basic_id`/`remote_id`, or the mapper treats them as a
-  detection
+  detection. They must carry `node_id` and `threshold_dbm`: the mapper records the
+  station as alive and uses silence as a "not within range" constraint
+- `PEAK_PICK` reports only the strongest of adjacent channels so one VTX is one
+  tracking key per station; the mapper additionally clusters reports within 20 MHz
 
 ## RX5808 firmware
 
@@ -53,6 +62,17 @@ firmware and the home node live on `main` and must not be copied here.
   `(freq-479)/2`; the flat form mistunes by ~4 GHz
 - Mesh relay lines are `\n`-terminated only (no CR) and written as one burst; the
   Meshtastic TEXTMSG serial module broadcasts raw chunks
+- RSSI reads use `analogRead` (raw, for the threshold) **and** `analogReadMilliVolts`
+  (eFuse-calibrated, for dBm); JSON is built with `snprintf`, no ArduinoJson
+- `firmware/*.bin` are rebuilt from the default configuration whenever the emitted
+  JSON changes (`pio run -e seeed_xiao_esp32s3 -e seeed_xiao_esp32c5`)
+
+## Station v2 hardware
+
+- `docs/LEVEL1-V2-HARDWARE.md` is the spec: 4 sector patches + SP4T switch on
+  D1/D2/D3, video sync separator on D6/D7, pin budget for S3 and C5. New JSON keys it
+  introduces (`bearing_deg`, `sectors`, `video`, `sync_hz`) are additive and need the
+  matching mapper change on `main` before they are emitted
 
 ## RX3364 work
 
