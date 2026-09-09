@@ -484,11 +484,19 @@ project's `main.cpp` are the authority.
 > its **mesh relay is silent** — it would still report normally over USB. The Level 1
 > firmware takes its pins from the variant, so the two disagree today.
 >
-> **Check before trusting a C5 node's mesh path:** confirm that a C5 station's
-> detections reach the mapper *through the home node*, not only over USB. Then
-> settle it with a continuity test from the XIAO's D4 pad and correct whichever
-> side is wrong. The S3 is unaffected: GPIO5/GPIO6 are D4/D5 in the S3 variant, so
-> every S3 node and the carrier PCB itself are correct either way.
+> **The PCB is not in question, and the fault is fleet-wide or nothing.** Every
+> Level 2 station uses the same carrier layout, so an S3 and a C5 sit in the same
+> socket and reach the Heltec through the same two pads. Working S3 nodes therefore
+> already prove the board routes D4/D5 correctly; the only variable left is which
+> GPIO the C5 exposes on those pads. Since every C5 node shares that PCB and that
+> binary, they either all relay or none do.
+>
+> **One check settles the whole fleet:** has *any* C5 Level 2 station's detection
+> ever reached the mapper **through the home node**, rather than only over USB? If
+> yes, GPIO6/GPIO7 is right and this warning is wrong. If no C5 node has ever
+> relayed, the variant is right and every fielded C5 needs a firmware fix and a
+> reflash. Confirm with a continuity test from the XIAO's D4 pad before changing
+> either side.
 
 ### Meshtastic node naming
 

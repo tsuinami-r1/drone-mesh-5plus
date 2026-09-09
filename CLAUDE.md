@@ -69,8 +69,12 @@
 - The XIAO ESP32-C5 D4/D5 GPIO numbers are disputed: `remoteid-c5-5g` hardcodes
   GPIO6/GPIO7, the Arduino variant says GPIO23/GPIO24 (and calls GPIO6 the battery
   sense pin). If the variant is right, fielded C5 Level 2 nodes have a silent mesh
-  relay. See the warning under "Wiring for mesh integration" in README.md; settle it
-  with a continuity test before changing either side
+  relay while USB reporting looks normal. All Level 2 stations share one carrier
+  layout, so working S3 nodes already prove the board routes D4/D5 correctly and the
+  C5 fleet either all relays or none does — one historical check of whether any C5
+  detection ever arrived via the home node settles it. See the warning under "Wiring
+  for mesh integration" in README.md; confirm with a continuity test before changing
+  either side
 - Run `python3 mapper_test/analog_fusion_test.py` after touching anything analog
 - Home node (`node-mode-dualcore/src/main_home.cpp`) forwards `"analog_fm"` lines
   without MAC dedup: several stations legitimately report the same synthetic MAC
