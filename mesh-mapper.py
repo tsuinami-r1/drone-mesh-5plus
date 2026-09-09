@@ -2,6 +2,7 @@ import os
 import time
 import json
 import csv
+import math
 import logging
 import colorsys
 import threading
@@ -89,6 +90,12 @@ def cleanup_old_detections():
         # recent-transmission check, which is therefore always true.
         if age > 30:
             backend_alerted_no_gps.discard(mac)
+
+    # Age out analog observations and multi-station fixes
+    try:
+        _analog_refresh_fixes()
+    except Exception as exc:
+        logger.debug(f"analog fusion cleanup error: {exc}")
 
     # Prune stale inbound TAK contacts
     with TAK_CONTACTS_LOCK:
@@ -252,25 +259,502 @@ serial_objs = {}
 serial_objs_lock = threading.Lock()
 
 # ============================================================
-# RX5808 Analog FM — node locations & range estimation
+# Level 1 analog FM — node locations, range estimation, multi-station fusion
 # ============================================================
 NODE_LOCATIONS = {}          # {node_id: {"lat","lon","alt","source","last_updated"}}
 NODE_LOCATIONS_LOCK = threading.Lock()
 MESHTASTIC_URLS = {}         # {node_id: base_url}  — Meshtastic HTTP API roots
 MESHTASTIC_POLL_INTERVAL = 30  # seconds
 
-_FSPL_5800_DB      = 47.72   # free-space path loss constant for 5.8 GHz
-DEFAULT_TX_DBM     = 20      # assumed FPV VTX power: 100 mW = 20 dBm
+# Liveness / calibration of every Level 1 station that has spoken, keyed by
+# node_id. Filled from analog heartbeats and detections. A station that is
+# alive (recent heartbeat) but silent about an emitter is itself a measurement
+# for the position solver: the emitter is NOT within that station's range.
+NODE_STATUS = {}             # {node_id: {"last_seen","last_heartbeat","threshold_dbm","receiver","temp_c","uptime_s","seq"}}
+NODE_STATUS_LOCK = threading.Lock()
+
+DEFAULT_TX_DBM     = 20      # assumed FPV VTX power for single-station rings: 100 mW = 20 dBm
+
+# RX5808 raw-count fallback curve, for stations that predate the firmware
+# "rssi_dbm" key. Mirrors the level1-station firmware defaults exactly:
+# ADC_11db ≈ 3100 mV full scale over 4095 counts, 450 mV ≈ -95 dBm,
+# 1100 mV ≈ -20 dBm, linear in between. (The RX5808 RSSI pin swings ~0–1 V,
+# i.e. ~0–1320 counts; the old 1800–4095 mapping could never be reached.)
+_RX5808_MV_PER_COUNT = 3100.0 / 4095.0
+_RX5808_CAL_MV_LO, _RX5808_CAL_DBM_LO = 450.0, -95.0
+_RX5808_CAL_MV_HI, _RX5808_CAL_DBM_HI = 1100.0, -20.0
+_RX5808_DB_PER_COUNT = ((_RX5808_CAL_DBM_HI - _RX5808_CAL_DBM_LO)
+                        / (_RX5808_CAL_MV_HI - _RX5808_CAL_MV_LO) * _RX5808_MV_PER_COUNT)
 
 def _rssi_raw_to_dbm(rssi_raw):
-    """Map RX5808 12-bit ADC value → approximate received power (dBm).
-    Empirical: threshold 1800 ≈ -85 dBm, full-scale 4095 ≈ -15 dBm."""
-    v = max(0, min(4095, int(rssi_raw)))
-    return -85.0 + (v - 1800) / (4095 - 1800) * 70.0
+    """Map an RX5808 12-bit ADC count to approximate received power (dBm)."""
+    try:
+        v = max(0.0, min(4095.0, float(rssi_raw)))
+    except (TypeError, ValueError):
+        v = 0.0
+    mv = v * _RX5808_MV_PER_COUNT
+    dbm = _RX5808_CAL_DBM_LO + (mv - _RX5808_CAL_MV_LO) * (
+        (_RX5808_CAL_DBM_HI - _RX5808_CAL_DBM_LO) / (_RX5808_CAL_MV_HI - _RX5808_CAL_MV_LO))
+    return max(-120.0, min(0.0, dbm))
 
-def _rssi_to_max_range_m(rssi_raw, tx_dbm=DEFAULT_TX_DBM):
-    """Estimate maximum detection radius (m) via free-space path loss at 5.8 GHz."""
-    return max(1.0, 10.0 ** ((tx_dbm - _rssi_raw_to_dbm(rssi_raw) - _FSPL_5800_DB) / 20.0))
+def _detection_dbm(det):
+    """Received power for an analog_fm detection: the firmware's calibrated
+    rssi_dbm when present, else the RX5808 raw-count curve above."""
+    v = det.get("rssi_dbm")
+    if isinstance(v, (int, float)):
+        return float(v), "firmware"
+    return _rssi_raw_to_dbm(det.get("rssi_raw", det.get("rssi", 0))), "mapper"
+
+def _fspl_const_db(freq_mhz):
+    """Free-space path-loss constant: FSPL(dB) = 20·log10(d_m) + this."""
+    try:
+        f = float(freq_mhz)
+    except (TypeError, ValueError):
+        f = 5800.0
+    if f <= 0:
+        f = 5800.0
+    return 20.0 * math.log10(f) - 27.55        # 5800 MHz → 47.72, 3400 MHz → 43.08
+
+def _max_range_m(rx_dbm, freq_mhz, tx_dbm=DEFAULT_TX_DBM):
+    """Upper bound on emitter distance (m) via free-space path loss, given an
+    assumed transmitter power. This is a single-station 'no further than'
+    ring; the multi-station solver below is what produces a position."""
+    return max(1.0, 10.0 ** ((tx_dbm - rx_dbm - _fspl_const_db(freq_mhz)) / 20.0))
+
+def _analog_basic_id(det):
+    """Human-readable label; the compact mesh line omits it to save airtime."""
+    freq = det.get("freq_mhz", "?")
+    rx   = str(det.get("receiver", "")).lower()
+    try:
+        prefix = "3.3G" if (rx == "rx3364" or float(freq) < 4500) else "5.8G"
+    except (TypeError, ValueError):
+        prefix = "5.8G"
+    return f"{prefix}-{det.get('band', '?')}{det.get('ch', '')}-{freq}MHz"
+
+def _analog_normalise(det):
+    """Backfill the keys a compact mesh-relayed analog_fm line omits so every
+    downstream consumer (CSV, popup, TAK, fusion) sees the full contract."""
+    if "rssi_raw" not in det and "rssi" in det:
+        det["rssi_raw"] = det["rssi"]
+    if "rssi" not in det and "rssi_raw" in det:
+        det["rssi"] = det["rssi_raw"]
+    if not det.get("basic_id"):
+        det["basic_id"] = _analog_basic_id(det)
+    det.setdefault("receiver", "rx5808")
+    dbm, src = _detection_dbm(det)
+    det["rssi_dbm"]   = round(dbm, 1)
+    det["dbm_source"] = src
+
+def _analog_note_node(msg):
+    """Record liveness + calibration for a Level 1 station from any line that
+    names it (heartbeat, info, detection)."""
+    node_id = msg.get("node_id")
+    if not node_id:
+        return
+    now = time.time()
+    with NODE_STATUS_LOCK:
+        st = NODE_STATUS.setdefault(node_id, {})
+        st["last_seen"] = now
+        if "heartbeat" in msg or "info" in msg:
+            st["last_heartbeat"] = now
+        for k in ("threshold_dbm", "receiver", "temp_c", "uptime_s", "seq", "threshold"):
+            if k in msg:
+                st[k] = msg[k]
+        if "threshold_dbm" not in st and "threshold" in st:
+            # Pre-rssi_dbm firmware: derive from the raw threshold
+            st["threshold_dbm"] = round(_rssi_raw_to_dbm(st["threshold"]), 1)
+
+# ---- Differential-RSSI multilateration ----
+#
+# One station's RSSI cannot give distance because the transmitter power is
+# unknown (a 25 mW whoop and a 4 W long-range VTX differ by 22 dB). Several
+# stations seeing the same carrier CAN: with the log-distance model
+#     p_i = P0 - 10·n·log10(d_i)
+# P0 (power at 1 m, i.e. the unknown TX power) cancels in the differences, so
+# three stations solve for (x, y, P0); more over-determine it. Stations that
+# are alive but silent add "not within range of here" constraints, which is
+# what lets a dense field of cheap nodes narrow a fix even with two positive
+# observations. The solver is a robust grid search: cheap, no linearisation,
+# and it yields a confidence region rather than a false-precise point.
+ANALOG_FUSION_WINDOW_S     = 25.0   # observations older than this leave the fix (mesh cadence is 10 s)
+ANALOG_CLUSTER_MHZ         = 20     # reports within this many MHz are one emitter (carrier is ~20 MHz wide)
+ANALOG_PATH_LOSS_EXP       = 2.3    # log-distance exponent: 2.0 free space, 2.2–2.8 suburban clutter
+ANALOG_SIGMA_DB            = 6.0    # assumed per-observation error (fading, antenna pattern, calibration)
+ANALOG_NODE_ALIVE_S        = 300.0  # station heard within this counts as alive (mesh heartbeat is 120 s)
+ANALOG_SILENT_MARGIN_DB    = 6.0    # fading allowance: silence only says 'below threshold + this'
+ANALOG_TX_MIN_DBM          = 10.0   # plausible VTX power range (10 mW … 5 W): weak prior that bounds
+ANALOG_TX_MAX_DBM          = 37.0   #   the 'far away and very strong' family of solutions
+ANALOG_MAX_SILENT_NODES    = 30
+ANALOG_GRID_N              = 41     # coarse grid points per axis
+ANALOG_FINE_N              = 21
+ANALOG_REGION_DELTA        = 4.61   # Δcost for the 90 % region with 2 position DOF
+ANALOG_ERR_GOOD_M          = 300.0
+ANALOG_ERR_FAIR_M          = 1000.0
+ANALOG_FIX_STALE_S         = 60.0   # fix not refreshed for this long → inactive
+ANALOG_FIX_DROP_S          = 600.0
+
+ANALOG_OBS   = {}   # {mac: {node_id: {"dbm","t","freq_mhz","band","ch","spread_db","seq","basic_id"}}}
+ANALOG_FIXES = {}   # {fix_id: {...}}  see _analog_refresh_fixes
+ANALOG_LOCK  = threading.Lock()
+_analog_fix_counter = 0
+
+def _analog_project(lat, lon, lat0, lon0):
+    """Local east/north metres around (lat0, lon0); fine for a city-scale mesh."""
+    x = (lon - lon0) * 111320.0 * math.cos(math.radians(lat0))
+    y = (lat - lat0) * 110540.0
+    return x, y
+
+def _analog_unproject(x, y, lat0, lon0):
+    lat = lat0 + y / 110540.0
+    lon = lon0 + x / (111320.0 * math.cos(math.radians(lat0)))
+    return lat, lon
+
+def _analog_record_observation(det):
+    """Store the latest calibrated observation of this channel by this station."""
+    mac, node_id = det.get("mac"), det.get("node_id")
+    if not mac or not node_id:
+        return
+    dbm, _ = _detection_dbm(det)
+    spread_db = 0.0
+    try:
+        if "rssi_min" in det and "rssi_max" in det:
+            spread_db = max(0.0, (float(det["rssi_max"]) - float(det["rssi_min"])) * _RX5808_DB_PER_COUNT)
+    except (TypeError, ValueError):
+        pass
+    obs = {
+        "dbm": float(dbm), "t": time.time(),
+        "freq_mhz": det.get("freq_mhz", 0), "band": det.get("band", "?"), "ch": det.get("ch", ""),
+        "spread_db": round(spread_db, 1), "seq": det.get("seq"),
+        "basic_id": det.get("basic_id", ""), "mac": mac, "node_id": node_id,
+    }
+    with ANALOG_LOCK:
+        ANALOG_OBS.setdefault(mac, {})[node_id] = obs
+
+def _analog_solve(obs, silent, n_exp=ANALOG_PATH_LOSS_EXP, sigma_db=ANALOG_SIGMA_DB,
+                  margin_db=ANALOG_SILENT_MARGIN_DB, grid_n=ANALOG_GRID_N, p0_range=None):
+    """Grid-search position solver.
+
+    obs:      [(x, y, dbm, weight)]  stations that heard the emitter
+    silent:   [(x, y, threshold_dbm)] alive stations that did not; each says
+              the emitter's power there is below threshold + margin_db
+    p0_range: (min, max) plausible power at 1 m, from the VTX power prior
+    Returns dict(x, y, p0_dbm, rms_db, err_m, bounded, cost, ...) or None.
+    """
+    if len(obs) < 2 or len(obs) + len(silent) < 3:
+        return None
+    pts = [(o[0], o[1]) for o in obs] + [(s[0], s[1]) for s in silent]
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+    span = max(max(xs) - min(xs), max(ys) - min(ys), 300.0)
+    pad = 1.5 * span
+    x0, x1 = min(xs) - pad, max(xs) + pad
+    y0, y1 = min(ys) - pad, max(ys) + pad
+    wsum = sum(o[3] for o in obs) or 1.0
+    n_obs = len(obs)
+
+    def sse_at(x, y):
+        """Weighted squared residual (dB²) at a candidate, with the closed-form
+        best P0, plus the silent-station penalty (dB²). Returns (sse, pen, p0)."""
+        num = 0.0
+        losses = []
+        for ox, oy, p, w in obs:
+            d = math.hypot(x - ox, y - oy)
+            if d < 5.0:
+                d = 5.0
+            l = 10.0 * n_exp * math.log10(d)
+            losses.append(l)
+            num += w * (p + l)
+        p0 = num / wsum                      # best TX power for this candidate
+        sse = 0.0
+        for (ox, oy, p, w), l in zip(obs, losses):
+            r = p + l - p0
+            sse += w * r * r
+        pen = 0.0
+        for sx, sy, thr in silent:
+            d = math.hypot(x - sx, y - sy)
+            if d < 5.0:
+                d = 5.0
+            excess = (p0 - 10.0 * n_exp * math.log10(d)) - (thr + margin_db)
+            if excess > 0.0:
+                pen += excess * excess
+        if p0_range is not None:
+            if p0 < p0_range[0]:
+                pen += (p0_range[0] - p0) ** 2
+            elif p0 > p0_range[1]:
+                pen += (p0 - p0_range[1]) ** 2
+        return sse, pen, p0
+
+    # Coarse grid over the whole search box
+    n = max(5, int(grid_n))
+    dx = (x1 - x0) / (n - 1)
+    dy = (y1 - y0) / (n - 1)
+    total = [[0.0] * n for _ in range(n)]
+    cells = {}
+    for i in range(n):
+        gx = x0 + i * dx
+        for j in range(n):
+            gy = y0 + j * dy
+            sse, pen, p0 = sse_at(gx, gy)
+            total[i][j] = sse + pen
+            cells[(i, j)] = (gx, gy, sse, pen, p0)
+
+    # Every coarse local minimum is a candidate basin. Differential RSSI has
+    # genuine mirror solutions for symmetric station layouts (two basins with
+    # near-identical residuals), so refining only the single best coarse cell
+    # can pick the wrong one. Refine the lowest few and keep the best.
+    minima = []
+    for i in range(n):
+        for j in range(n):
+            c = total[i][j]
+            is_min = True
+            for di in (-1, 0, 1):
+                for dj in (-1, 0, 1):
+                    ii, jj = i + di, j + dj
+                    if (di or dj) and 0 <= ii < n and 0 <= jj < n and total[ii][jj] < c:
+                        is_min = False
+                        break
+                if not is_min:
+                    break
+            if is_min:
+                minima.append((c, i, j))
+    minima.sort()
+    fn = max(5, int(ANALOG_FINE_N))
+    best = None                      # (total, x, y, sse, pen, p0)
+    for c, i, j in minima[:6]:
+        cx, cy = cells[(i, j)][0], cells[(i, j)][1]
+        hx, hy = dx, dy
+        cand = (c, cx, cy, cells[(i, j)][2], cells[(i, j)][3], cells[(i, j)][4])
+        for _ in range(2):           # two zoom levels: ±1 coarse cell, then ±1 fine cell
+            fdx, fdy = 2 * hx / (fn - 1), 2 * hy / (fn - 1)
+            bx, by = cand[1], cand[2]
+            for a in range(fn):
+                gx = bx - hx + a * fdx
+                for b in range(fn):
+                    gy = by - hy + b * fdy
+                    sse, pen, p0 = sse_at(gx, gy)
+                    if sse + pen < cand[0]:
+                        cand = (sse + pen, gx, gy, sse, pen, p0)
+            hx, hy = fdx, fdy
+        if best is None or cand[0] < best[0]:
+            best = cand
+
+    rms = math.sqrt(best[3] / wsum)
+    # Error scale: the prior σ, tightened by the actual fit when there are
+    # enough stations to estimate it (n_obs - 3 degrees of freedom), never
+    # below 3 dB so a lucky fit cannot claim metre precision.
+    sigma_eff = sigma_db
+    if n_obs >= 4:
+        sigma_eff = max(3.0, min(sigma_db, rms * math.sqrt(n_obs / (n_obs - 3.0))))
+
+    # 90 % region from the coarse grid: every cell whose cost is within Δ of the
+    # best (in units of σ_eff²). Its extent is the reported error radius; if
+    # it touches the search boundary the solution is unbounded on that side.
+    limit = best[0] + ANALOG_REGION_DELTA * sigma_eff * sigma_eff
+    region = {ij for ij, c in cells.items() if c[2] + c[3] <= limit}
+
+    # The region can be several islands: the basin holding the best point plus
+    # a mirror basin that the data cannot rule out. The reported radius covers
+    # only the best point's island; any other island is reported as an
+    # alternate so the operator sees the ambiguity instead of a bloated circle.
+    bi = min(range(n), key=lambda i: abs(x0 + i * dx - best[1]))
+    bj = min(range(n), key=lambda j: abs(y0 + j * dy - best[2]))
+    seed = (bi, bj) if (bi, bj) in region else None
+    if seed is None and region:
+        seed = min(region, key=lambda ij: math.hypot(cells[ij][0] - best[1], cells[ij][1] - best[2]))
+    island = set()
+    if seed is not None:
+        stack = [seed]
+        while stack:
+            ij = stack.pop()
+            if ij in island or ij not in region:
+                continue
+            island.add(ij)
+            i, j = ij
+            for di in (-1, 0, 1):
+                for dj in (-1, 0, 1):
+                    if di or dj:
+                        stack.append((i + di, j + dj))
+    err = 0.0
+    bounded = True
+    for (i, j) in island:
+        gx, gy = cells[(i, j)][0], cells[(i, j)][1]
+        err = max(err, math.hypot(gx - best[1], gy - best[2]))
+        if i == 0 or j == 0 or i == n - 1 or j == n - 1:
+            bounded = False
+    others = region - island
+    alt = None
+    if others:
+        oi = min(others, key=lambda ij: cells[ij][2] + cells[ij][3])
+        alt = {"x": cells[oi][0], "y": cells[oi][1],
+               "cost_excess_db2": round(cells[oi][2] + cells[oi][3] - best[0], 1)}
+
+    err = max(err, math.hypot(dx, dy) / 2.0)
+    return {"x": best[1], "y": best[2], "p0_dbm": best[5], "rms_db": rms,
+            "err_m": err, "bounded": bounded, "cost": best[0] / (sigma_eff * sigma_eff),
+            "sigma_eff_db": sigma_eff, "ambiguous": alt is not None, "alt": alt}
+
+def _analog_refresh_fixes():
+    """Cluster live observations into emitters, solve each, publish ANALOG_FIXES."""
+    global _analog_fix_counter
+    now = time.time()
+    with ANALOG_LOCK:
+        live = []
+        for mac, per_node in list(ANALOG_OBS.items()):
+            for node_id, o in list(per_node.items()):
+                if now - o["t"] > ANALOG_FUSION_WINDOW_S:
+                    del per_node[node_id]
+                else:
+                    live.append(o)
+            if not per_node:
+                del ANALOG_OBS[mac]
+    if not live:
+        return
+
+    with NODE_LOCATIONS_LOCK:
+        locs = {k: dict(v) for k, v in NODE_LOCATIONS.items()}
+    with NODE_STATUS_LOCK:
+        status = {k: dict(v) for k, v in NODE_STATUS.items()}
+
+    # Cluster by frequency: chain observations whose freq_mhz are within
+    # ANALOG_CLUSTER_MHZ of each other (a carrier straddling two channels, or
+    # two stations peak-picking different neighbours, is one emitter).
+    live.sort(key=lambda o: float(o.get("freq_mhz") or 0))
+    clusters = []
+    for o in live:
+        f = float(o.get("freq_mhz") or 0)
+        if clusters and f - clusters[-1]["fmax"] <= ANALOG_CLUSTER_MHZ:
+            clusters[-1]["obs"].append(o)
+            clusters[-1]["fmax"] = f
+        else:
+            clusters.append({"obs": [o], "fmax": f})
+
+    new_fixes = {}
+    for cl in clusters:
+        # Strongest observation per station
+        per_node = {}
+        for o in cl["obs"]:
+            cur = per_node.get(o["node_id"])
+            if cur is None or o["dbm"] > cur["dbm"]:
+                per_node[o["node_id"]] = o
+        heard = [o for o in per_node.values() if o["node_id"] in locs]
+        macs = sorted({o["mac"] for o in cl["obs"]})
+        if len(heard) < 2:
+            continue
+        strongest = max(heard, key=lambda o: o["dbm"])
+
+        # Silent-but-alive positioned stations
+        silent_nodes = []
+        for nid, st in status.items():
+            if nid in per_node or nid not in locs:
+                continue
+            if now - st.get("last_seen", 0) > ANALOG_NODE_ALIVE_S:
+                continue
+            thr = st.get("threshold_dbm")
+            if not isinstance(thr, (int, float)):
+                continue
+            silent_nodes.append((nid, float(thr)))
+        silent_nodes = silent_nodes[:ANALOG_MAX_SILENT_NODES]
+
+        lat0 = sum(locs[o["node_id"]]["lat"] for o in heard) / len(heard)
+        lon0 = sum(locs[o["node_id"]]["lon"] for o in heard) / len(heard)
+        obs_xy = []
+        for o in heard:
+            x, y = _analog_project(locs[o["node_id"]]["lat"], locs[o["node_id"]]["lon"], lat0, lon0)
+            age = now - o["t"]
+            w = 1.0 / (1.0 + (o["spread_db"] / ANALOG_SIGMA_DB) ** 2)
+            w *= math.exp(-age / ANALOG_FUSION_WINDOW_S)
+            obs_xy.append((x, y, o["dbm"], w))
+        sil_xy = []
+        for nid, thr in silent_nodes:
+            x, y = _analog_project(locs[nid]["lat"], locs[nid]["lon"], lat0, lon0)
+            sil_xy.append((x, y, thr))
+
+        freq = strongest.get("freq_mhz", 0)
+        fspl_c = _fspl_const_db(freq)
+        sol = _analog_solve(obs_xy, sil_xy,
+                            p0_range=(ANALOG_TX_MIN_DBM - fspl_c, ANALOG_TX_MAX_DBM - fspl_c))
+        if sol is None:
+            continue
+        lat, lon = _analog_unproject(sol["x"], sol["y"], lat0, lon0)
+        tx_est = sol["p0_dbm"] + fspl_c                 # P0 is power at 1 m
+        if not sol["bounded"]:
+            quality = "poor"
+        elif sol["err_m"] <= ANALOG_ERR_GOOD_M:
+            quality = "good"
+        elif sol["err_m"] <= ANALOG_ERR_FAIR_M:
+            quality = "fair"
+        else:
+            quality = "poor"
+
+        # Stable fix id: reuse any existing fix that shares a tracking key
+        fix_id = None
+        with ANALOG_LOCK:
+            for fid, fx in ANALOG_FIXES.items():
+                if set(fx.get("macs", [])) & set(macs) and fid not in new_fixes:
+                    fix_id = fid
+                    break
+            if fix_id is None:
+                _analog_fix_counter += 1
+                fix_id = f"AFX-{int(float(freq))}-{_analog_fix_counter}"
+
+        alt = None
+        if sol.get("alt"):
+            alat, alon = _analog_unproject(sol["alt"]["x"], sol["alt"]["y"], lat0, lon0)
+            alt = {"lat": round(alat, 6), "lon": round(alon, 6),
+                   "cost_excess_db2": sol["alt"]["cost_excess_db2"]}
+        new_fixes[fix_id] = {
+            "fix_id": fix_id, "type": "analog_fix",
+            "lat": round(lat, 6), "lon": round(lon, 6),
+            "err_m": round(sol["err_m"]), "bounded": sol["bounded"], "quality": quality,
+            "ambiguous": sol.get("ambiguous", False), "alt": alt,
+            "sigma_eff_db": round(sol.get("sigma_eff_db", ANALOG_SIGMA_DB), 1),
+            "rms_db": round(sol["rms_db"], 1),
+            "p0_dbm": round(sol["p0_dbm"], 1), "tx_dbm_est": round(tx_est, 1),
+            "path_loss_exp": ANALOG_PATH_LOSS_EXP,
+            "freq_mhz": freq, "band": strongest.get("band", "?"), "ch": strongest.get("ch", ""),
+            "basic_id": strongest.get("basic_id", ""), "macs": macs,
+            "n_nodes": len(heard), "n_silent": len(sil_xy),
+            "nodes": [{"node_id": o["node_id"], "dbm": round(o["dbm"], 1),
+                       "age_s": round(now - o["t"]), "mac": o["mac"],
+                       "lat": locs[o["node_id"]]["lat"], "lon": locs[o["node_id"]]["lon"]}
+                      for o in sorted(heard, key=lambda o: -o["dbm"])],
+            "silent_nodes": [nid for nid, _ in silent_nodes],
+            "last_update": now, "status": "active",
+        }
+
+    with ANALOG_LOCK:
+        for fid, fx in new_fixes.items():
+            ANALOG_FIXES[fid] = fx
+        # Age out fixes that were not refreshed
+        for fid, fx in list(ANALOG_FIXES.items()):
+            if fid in new_fixes:
+                continue
+            age = now - fx.get("last_update", 0)
+            if age > ANALOG_FIX_DROP_S:
+                del ANALOG_FIXES[fid]
+            elif age > ANALOG_FIX_STALE_S:
+                fx["status"] = "inactive"
+
+    # Annotate participating detections and publish
+    for fid, fx in new_fixes.items():
+        for mac in fx["macs"]:
+            det = tracked_pairs.get(mac)
+            if det is not None and det.get("type") == "analog_fm":
+                det["fix_id"] = fid
+                det["fix_lat"] = fx["lat"]
+                det["fix_lon"] = fx["lon"]
+                det["fix_err_m"] = fx["err_m"]
+                det["fix_quality"] = fx["quality"]
+        try:
+            socketio.emit('analog_fix', fx, )
+        except Exception:
+            pass
+        _tak_enqueue_fix(fx)
+        logger.info(
+            f"[analog fix] {fx['basic_id']} @ {fx['lat']:.5f},{fx['lon']:.5f} "
+            f"±{fx['err_m']} m ({fx['quality']}) nodes={fx['n_nodes']} silent={fx['n_silent']} "
+            f"tx≈{fx['tx_dbm_est']} dBm rms={fx['rms_db']} dB"
+        )
 
 def _fetch_meshtastic_position(url, node_id=None):
     """Query Meshtastic HTTP API; return position dict or None.
@@ -384,9 +868,12 @@ def _tak_enqueue(detection):
         ch       = detection.get("ch", "?")
         freq     = detection.get("freq_mhz", "?")
         rssi     = detection.get("rssi_raw", detection.get("rssi", "?"))
+        dbm      = detection.get("rssi_dbm", "?")
         node_id  = detection.get("node_id", "?")
-        callsign = f"5.8G-{band}{ch}-{freq}MHz"
-        remarks  = f"Analog FM {freq}MHz RSSI={rssi} node={node_id}"
+        callsign = detection.get("basic_id") or f"5.8G-{band}{ch}-{freq}MHz"
+        remarks  = f"Analog FM {freq}MHz RSSI={rssi} ({dbm} dBm) node={node_id}"
+        if detection.get("fix_id"):
+            remarks += f" fix={detection['fix_id']} ±{detection.get('fix_err_m', '?')}m"
 
         # Point marker at the node (sensor) position
         try:
@@ -458,6 +945,45 @@ def _tak_enqueue(detection):
                 ))
             except _qmod.Full:
                 pass
+
+def _tak_enqueue_fix(fix):
+    """CoT for a multi-station analog fix: an unknown-UAS point at the solved
+    position plus a circle for the 90 % confidence region. Poor-quality fixes
+    are not sent, so ATAK never shows a confident-looking marker for one."""
+    if not TAK_ENABLE or fix.get("quality") == "poor":
+        return
+    fid      = fix["fix_id"]
+    callsign = f"FIX {fix.get('basic_id') or fid}"
+    remarks  = (f"Analog FM fix from {fix.get('n_nodes')} stations "
+                f"({', '.join(n['node_id'] for n in fix.get('nodes', []))}), "
+                f"{fix.get('n_silent')} silent; ±{fix.get('err_m')} m; "
+                f"TX≈{fix.get('tx_dbm_est')} dBm; rms {fix.get('rms_db')} dB")
+    try:
+        _tak_queue.put_nowait(_cot_event(
+            uid=f"ANALOGFIX-{fid}",
+            cot_type="a-u-A-M-F-U-M",        # unknown unmanned aircraft
+            lat=float(fix["lat"]), lon=float(fix["lon"]), hae=0.0,
+            stale_s=TAK_STALE_ANALOG_S,
+            callsign=callsign, remarks=remarks
+        ))
+        err = fix.get("err_m") or 0
+        if err:
+            ring_extra = (
+                f'<shape><ellipse major="{err}" minor="{err}" angle="0"/></shape>'
+                '<strokeColor value="-65281"/>'       # ARGB 0xFFFF00FF = magenta
+                '<fillColor value="587137279"/>'      # ARGB 0x23FF00FF
+                '<strokeWeight value="2.0"/>'
+            )
+            _tak_queue.put_nowait(_cot_event(
+                uid=f"ANALOGFIX-RING-{fid}",
+                cot_type="u-r-b-c-c",
+                lat=float(fix["lat"]), lon=float(fix["lon"]), hae=0.0,
+                stale_s=TAK_STALE_ANALOG_S,
+                callsign=f"{callsign} ±{err}m",
+                remarks=remarks, extra_detail=ring_extra
+            ))
+    except _qmod.Full:
+        pass
 
 def _tak_sender():
     """Daemon thread: drain _tak_queue and multicast CoT XML over UDP."""
@@ -1130,8 +1656,10 @@ def update_detection(detection):
         # Mark as active since this is a fresh detection
         detection["status"] = "active"
 
-        # Enrich RX5808 analog FM detections with node GPS + estimated range radius
+        # Enrich Level 1 analog FM detections with node GPS + estimated range radius
         if detection.get("type") == "analog_fm":
+            _analog_normalise(detection)     # backfill compact mesh lines, compute rssi_dbm
+            _analog_note_node(detection)     # station is alive
             node_id = detection.get("node_id")
             if node_id:
                 with NODE_LOCATIONS_LOCK:
@@ -1139,8 +1667,15 @@ def update_detection(detection):
                 if node_pos:
                     detection["node_lat"] = node_pos["lat"]
                     detection["node_lon"] = node_pos["lon"]
-                    rssi_raw = detection.get("rssi_raw", detection.get("rssi", 0))
-                    detection["radius_m"] = round(_rssi_to_max_range_m(rssi_raw))
+                    detection["radius_m"] = round(_max_range_m(
+                        detection["rssi_dbm"], detection.get("freq_mhz", 5800)))
+            # Carry the last multi-station fix forward so the popup keeps it
+            # between solver runs; _analog_refresh_fixes overwrites when it runs.
+            prev = tracked_pairs.get(mac)
+            if prev:
+                for k in ("fix_id", "fix_lat", "fix_lon", "fix_err_m", "fix_quality"):
+                    if k in prev and k not in detection:
+                        detection[k] = prev[k]
 
         # Preserve previous basic_id if new detection lacks one (same logic as GPS section)
         if not detection.get("basic_id") and mac in tracked_pairs and tracked_pairs[mac].get("basic_id"):
@@ -1204,6 +1739,15 @@ def update_detection(detection):
             socketio.emit('detection', detection, )
         except Exception:
             pass
+        # Multi-station fusion: record this observation, re-solve every
+        # emitter it may belong to, then send the (possibly fix-annotated)
+        # detection to TAK.
+        if detection.get("type") == "analog_fm":
+            try:
+                _analog_record_observation(detection)
+                _analog_refresh_fixes()
+            except Exception as exc:
+                logger.debug(f"analog fusion error: {exc}")
         _tak_enqueue(detection)
         return
 
@@ -3407,32 +3951,153 @@ function get_color_for_mac(mac) {
   return colorFromMac(mac);
 }
 
-// ---- RX5808 Analog FM helpers ----
-function rfRssiToColor(rssi_raw) {
-  // RX5808 RSSI spans ~0-1320 ADC counts (0-1 V at 12-bit / ADC_11db), and only
-  // signals above RSSI_THRESHOLD (default 600) reach the map. Colour by strength
-  // within that band: strong >= 1000 -> green, medium >= 800 -> amber, weak -> red.
-  // (Previous 3000/2200 thresholds were above the ADC max, so every ring was red.)
-  if (rssi_raw >= 1000) return '#00dd44';
-  if (rssi_raw >= 800)  return '#ffaa00';
+// ---- Level 1 analog FM helpers ----
+function rfRssiToColor(det) {
+  // Prefer the calibrated dBm the mapper attaches to every analog_fm detection
+  // (firmware-supplied or derived): strong >= -60 dBm green, >= -75 amber, else red.
+  // Fallback for a bare raw count (RX5808 ADC, ~0-1320): 1000 / 800.
+  if (det && typeof det === 'object') {
+    if (typeof det.rssi_dbm === 'number') {
+      if (det.rssi_dbm >= -60) return '#00dd44';
+      if (det.rssi_dbm >= -75) return '#ffaa00';
+      return '#ff4422';
+    }
+    det = det.rssi_raw || det.rssi || 0;
+  }
+  if (det >= 1000) return '#00dd44';
+  if (det >= 800)  return '#ffaa00';
   return '#ff4422';
 }
 
 function generateAnalogFmPopup(det) {
   const rssi   = det.rssi_raw || det.rssi || 0;
+  const dbm    = (typeof det.rssi_dbm === 'number') ? det.rssi_dbm.toFixed(1) + ' dBm' : '?';
+  const spread = (typeof det.rssi_min === 'number' && typeof det.rssi_max === 'number')
+                 ? ' (' + det.rssi_min + '–' + det.rssi_max + ')' : '';
   const radius = det.radius_m ? Math.round(det.radius_m) : '?';
   const ageSec = det.last_update ? Math.round(Date.now() / 1000 - det.last_update) : '?';
-  return '<div style="font-family:monospace;font-size:12px;min-width:190px;">' +
+  let fix = '';
+  if (det.fix_id) {
+    fix = '<b>Fix:</b> ' + det.fix_id + ' ±' + det.fix_err_m + ' m (' + det.fix_quality + ')<br>';
+  }
+  return '<div style="font-family:monospace;font-size:12px;min-width:200px;">' +
     '<b style="color:#ff8800;">&#128225; Analog FM Signal</b><br>' +
     '<b>Band:</b> ' + (det.band || '?') + (det.ch || '') +
     ' &nbsp;<b>Freq:</b> ' + (det.freq_mhz || '?') + ' MHz<br>' +
-    '<b>RSSI raw:</b> ' + rssi + '<br>' +
-    '<b>Est. range:</b> ~' + radius + ' m<br>' +
+    '<b>Receiver:</b> ' + (det.receiver || 'rx5808') + '<br>' +
+    '<b>RSSI:</b> ' + dbm + ' &nbsp;raw ' + rssi + spread + '<br>' +
+    '<b>Max range:</b> ~' + radius + ' m (assumes ' + (window.ANALOG_TX_DBM || 20) + ' dBm TX)<br>' +
+    fix +
     '<b>Node:</b> ' + (det.node_id || det.mac) + '<br>' +
     '<b>Age:</b> ' + ageSec + 's ago' +
     '</div>';
 }
-// ---- end RX5808 helpers ----
+
+// Multi-station (differential-RSSI) fixes: one marker + 90 % circle per emitter.
+const analogFixMarkers = {};
+const analogFixCircles = {};
+const analogFixLines   = {};
+const analogFixAlts    = {};   // ghost marker for an un-excluded mirror solution
+const ANALOG_FIX_STALE_S = 60;
+
+function analogFixColor(fix) {
+  if (fix.quality === 'good') return '#ff00ff';
+  if (fix.quality === 'fair') return '#ff66ff';
+  return '#aa88aa';
+}
+
+function generateAnalogFixPopup(fix) {
+  const ageSec = fix.last_update ? Math.round(Date.now() / 1000 - fix.last_update) : '?';
+  let nodes = '';
+  (fix.nodes || []).forEach(n => {
+    nodes += '&nbsp;&nbsp;' + n.node_id + ': ' + n.dbm + ' dBm (' + n.age_s + 's)<br>';
+  });
+  const silent = (fix.silent_nodes && fix.silent_nodes.length)
+    ? '<b>Silent:</b> ' + fix.silent_nodes.join(', ') + '<br>' : '';
+  return '<div style="font-family:monospace;font-size:12px;min-width:220px;">' +
+    '<b style="color:#ff00ff;">&#127919; Analog FM Fix</b><br>' +
+    '<b>Signal:</b> ' + (fix.basic_id || fix.freq_mhz + ' MHz') + '<br>' +
+    '<b>Position:</b> ' + fix.lat.toFixed(5) + ', ' + fix.lon.toFixed(5) + '<br>' +
+    '<b>Error (90%):</b> ±' + fix.err_m + ' m &nbsp;<b>' + fix.quality + '</b>' +
+    (fix.bounded ? '' : ' (unbounded)') + '<br>' +
+    (fix.ambiguous && fix.alt
+      ? '<b style="color:#ffaa00;">Ambiguous:</b> mirror solution near ' +
+        fix.alt.lat.toFixed(5) + ', ' + fix.alt.lon.toFixed(5) + '<br>' : '') +
+    '<b>Est. TX power:</b> ' + fix.tx_dbm_est + ' dBm &nbsp;<b>fit rms:</b> ' + fix.rms_db + ' dB<br>' +
+    '<b>Stations (' + fix.n_nodes + '):</b><br>' + nodes +
+    silent +
+    '<b>Age:</b> ' + ageSec + 's ago' +
+    '</div>';
+}
+
+function removeAnalogFix(id) {
+  if (analogFixMarkers[id]) { map.removeLayer(analogFixMarkers[id]); delete analogFixMarkers[id]; }
+  if (analogFixCircles[id]) { map.removeLayer(analogFixCircles[id]); delete analogFixCircles[id]; }
+  if (analogFixLines[id])   { map.removeLayer(analogFixLines[id]);   delete analogFixLines[id]; }
+  if (analogFixAlts[id])    { map.removeLayer(analogFixAlts[id]);    delete analogFixAlts[id]; }
+}
+
+async function updateAnalogFixes() {
+  let fixes = {};
+  try {
+    const response = await fetch(window.location.origin + '/api/analog_fixes');
+    fixes = await response.json();
+  } catch (error) { console.error("Error fetching analog fixes:", error); return; }
+  window.analog_fixes = fixes;
+  const now = Date.now() / 1000;
+  for (const id in analogFixMarkers) {
+    if (!fixes[id]) removeAnalogFix(id);
+  }
+  for (const id in fixes) {
+    const fix = fixes[id];
+    const stale = !fix.last_update || (now - fix.last_update > ANALOG_FIX_STALE_S)
+                  || fix.status !== 'active';
+    // Poor fixes stay in the popups of their rings but never get a marker of
+    // their own: a confident-looking icon for an unbounded solution misleads.
+    if (stale || fix.quality === 'poor') { removeAnalogFix(id); continue; }
+    const color = analogFixColor(fix);
+    const popup = generateAnalogFixPopup(fix);
+    const latlng = [fix.lat, fix.lon];
+    if (analogFixMarkers[id]) {
+      analogFixMarkers[id].setLatLng(latlng);
+      if (!analogFixMarkers[id].isPopupOpen()) analogFixMarkers[id].setPopupContent(popup);
+    } else {
+      analogFixMarkers[id] = L.marker(latlng, { icon: createIcon('🎯', color), pane: 'droneIconPane' })
+        .bindPopup(popup).addTo(map);
+    }
+    if (analogFixCircles[id]) {
+      analogFixCircles[id].setLatLng(latlng);
+      analogFixCircles[id].setRadius(fix.err_m);
+      analogFixCircles[id].setStyle({ color: color, fillColor: color });
+    } else {
+      analogFixCircles[id] = L.circle(latlng, {
+        radius: fix.err_m, color: color, fillColor: color, fillOpacity: 0.12, weight: 2
+      }).bindPopup(popup).addTo(map);
+    }
+    // Thin spokes from each contributing station to the fix
+    const spokes = (fix.nodes || []).map(n => [[n.lat, n.lon], latlng]);
+    if (analogFixLines[id]) {
+      analogFixLines[id].setLatLngs(spokes);
+      analogFixLines[id].setStyle({ color: color });
+    } else {
+      analogFixLines[id] = L.polyline(spokes, { color: color, weight: 1, opacity: 0.6, dashArray: '2, 6' }).addTo(map);
+    }
+    // Mirror solution the data could not exclude: a faint "?" marker
+    if (fix.ambiguous && fix.alt) {
+      const altLatLng = [fix.alt.lat, fix.alt.lon];
+      if (analogFixAlts[id]) {
+        analogFixAlts[id].setLatLng(altLatLng);
+      } else {
+        analogFixAlts[id] = L.marker(altLatLng, { icon: createIcon('❔', color), pane: 'droneIconPane', opacity: 0.5 })
+          .bindPopup('<div style="font-family:monospace;font-size:12px;">Mirror solution for ' + id +
+                     '<br>(cannot be excluded by the current stations)</div>').addTo(map);
+      }
+    } else if (analogFixAlts[id]) {
+      map.removeLayer(analogFixAlts[id]); delete analogFixAlts[id];
+    }
+  }
+}
+// ---- end Level 1 analog FM helpers ----
 
 // ---- TAK contact helpers (inbound ATAK/WinTAK/iTAK operators) ----
 function takContactColor(cot_type) {
@@ -3650,9 +4315,9 @@ async function updateData() {
         alertedNoGpsDrones.delete(mac);
       }
 
-      // ---- RX5808 analog FM range ring ----
+      // ---- Level 1 analog FM range ring ----
       if (det.type === 'analog_fm' && det.node_lat && det.node_lon && det.radius_m) {
-        const ringColor = rfRssiToColor(det.rssi_raw || det.rssi || 0);
+        const ringColor = rfRssiToColor(det);
         const popup = generateAnalogFmPopup(det);
         if (analogFmRings[mac]) {
           analogFmRings[mac].setLatLng([det.node_lat, det.node_lon]);
@@ -3825,6 +4490,7 @@ async function updateData() {
       }
     }
   } catch (error) { console.error("Error fetching detection data:", error); }
+  updateAnalogFixes();
 }
 
 function createIcon(emoji, color) {
@@ -4333,6 +4999,11 @@ def serial_reader(port):
                     _detection_keys = ('drone_lat', 'pilot_lat', 'basic_id', 'remote_id')
                     if (('heartbeat' in detection or 'status' in detection or 'info' in detection)
                             and not any(k in detection for k in _detection_keys)):
+                        # Level 1 heartbeats name their station: record it as
+                        # alive (with its threshold) for the coverage-overlap
+                        # solver before dropping the line as a non-detection.
+                        if ('heartbeat' in detection or 'info' in detection) and detection.get('node_id'):
+                            _analog_note_node(detection)
                         logger.debug(f"Skipping status/info/heartbeat from {port}: {detection}")
                         continue
 
@@ -4350,13 +5021,14 @@ def serial_reader(port):
                         logger.debug(f"Skipping non-detection message from {port}: {detection}")
                         continue
 
-                    # RX5808 analog FM detection — log prominently, skip FAA lookup
+                    # Level 1 analog FM detection — log prominently, skip FAA lookup
                     if detection.get('type') == 'analog_fm':
                         logger.info(
-                            f"[RX5808] Analog FM signal: "
+                            f"[{detection.get('receiver', 'analog')}] Analog FM signal: "
                             f"Band={detection.get('band','?')}{detection.get('ch','?')} "
                             f"Freq={detection.get('freq_mhz','?')}MHz "
                             f"RSSI_raw={detection.get('rssi_raw','?')} "
+                            f"dBm={detection.get('rssi_dbm','?')} "
                             f"node={detection.get('node_id','?')} port={port}"
                         )
                         detection['_skip_faa'] = True
@@ -4928,6 +5600,62 @@ def api_meshtastic_url():
                                        'last_updated': time.time()}
     logger.info(f"Meshtastic URL configured: {node_id} → {url}  pos={pos}")
     return jsonify({'ok': True, 'position': pos})
+
+@app.route('/api/analog_fixes', methods=['GET'])
+def api_analog_fixes():
+    """Multi-station (differential-RSSI) position fixes for analog FM emitters."""
+    with ANALOG_LOCK:
+        return jsonify({k: dict(v) for k, v in ANALOG_FIXES.items()})
+
+@app.route('/api/analog_nodes', methods=['GET'])
+def api_analog_nodes():
+    """Every Level 1 station the mapper has heard: liveness, threshold, position."""
+    with NODE_STATUS_LOCK:
+        status = {k: dict(v) for k, v in NODE_STATUS.items()}
+    with NODE_LOCATIONS_LOCK:
+        locs = {k: dict(v) for k, v in NODE_LOCATIONS.items()}
+    now = time.time()
+    out = {}
+    for nid in set(status) | set(locs):
+        st = status.get(nid, {})
+        entry = dict(st)
+        entry["alive"] = (now - st.get("last_seen", 0)) <= ANALOG_NODE_ALIVE_S
+        if nid in locs:
+            entry["lat"] = locs[nid]["lat"]
+            entry["lon"] = locs[nid]["lon"]
+            entry["position_source"] = locs[nid].get("source")
+        out[nid] = entry
+    return jsonify(out)
+
+@app.route('/api/analog_fusion', methods=['GET', 'POST'])
+def api_analog_fusion():
+    """GET: current solver tuning. POST: override any of path_loss_exp,
+    sigma_db, silent_margin_db, window_s, cluster_mhz at runtime."""
+    global ANALOG_PATH_LOSS_EXP, ANALOG_SIGMA_DB, ANALOG_SILENT_MARGIN_DB
+    global ANALOG_FUSION_WINDOW_S, ANALOG_CLUSTER_MHZ
+    if request.method == 'POST':
+        data = request.get_json(force=True) or {}
+        try:
+            if 'path_loss_exp' in data:
+                ANALOG_PATH_LOSS_EXP = max(1.5, min(5.0, float(data['path_loss_exp'])))
+            if 'sigma_db' in data:
+                ANALOG_SIGMA_DB = max(1.0, min(20.0, float(data['sigma_db'])))
+            if 'silent_margin_db' in data:
+                ANALOG_SILENT_MARGIN_DB = max(0.0, min(40.0, float(data['silent_margin_db'])))
+            if 'window_s' in data:
+                ANALOG_FUSION_WINDOW_S = max(5.0, min(300.0, float(data['window_s'])))
+            if 'cluster_mhz' in data:
+                ANALOG_CLUSTER_MHZ = max(0, min(100, int(data['cluster_mhz'])))
+        except (TypeError, ValueError) as exc:
+            return jsonify({'error': str(exc)}), 400
+        logger.info(f"Analog fusion tuning updated: n={ANALOG_PATH_LOSS_EXP} σ={ANALOG_SIGMA_DB} "
+                    f"margin={ANALOG_SILENT_MARGIN_DB} window={ANALOG_FUSION_WINDOW_S} "
+                    f"cluster={ANALOG_CLUSTER_MHZ}")
+    return jsonify({
+        'path_loss_exp': ANALOG_PATH_LOSS_EXP, 'sigma_db': ANALOG_SIGMA_DB,
+        'silent_margin_db': ANALOG_SILENT_MARGIN_DB, 'window_s': ANALOG_FUSION_WINDOW_S,
+        'cluster_mhz': ANALOG_CLUSTER_MHZ, 'node_alive_s': ANALOG_NODE_ALIVE_S,
+    })
 
 @app.route('/api/tak_contacts', methods=['GET'])
 def api_tak_contacts():
