@@ -11,7 +11,7 @@
 Branch `level1-station` — firmware for the RX5808 (5.8 GHz) receiver today, the
 RX3364 (3.3 GHz) receiver next. Feeds `mesh-mapper.py` on `main`.
 
-[🏗️ Station tiers](#️-station-tiers) • [⚡ Quick Start](#-quick-start) • [📡 RX5808](#-rx5808-58ghz-analog-fm-detection-rx5808-detection) • [🔌 Mapper contract](#-mapper-contract-what-a-level-1-station-emits) • [🗺️ RX3364 roadmap](docs/RX3364-INTEGRATION-PLAN.md)
+[🏗️ Station tiers](#️-station-tiers) • [⚡ Quick Start](#-quick-start) • [📡 RX5808](#-rx5808-58ghz-analog-fm-detection-rx5808-detection) • [🔌 Mapper contract](#-mapper-contract-what-a-level-1-station-emits) • [🧭 Station v2 hardware](docs/LEVEL1-V2-HARDWARE.md) • [🗺️ RX3364 roadmap](docs/RX3364-INTEGRATION-PLAN.md)
 
 </div>
 
@@ -185,17 +185,29 @@ pio device monitor --baud 115200
 
 You should see within a few seconds:
 ```json
-{"info":"RX5808 scanner ready","node_id":"RX01","channels":40,"threshold":600}
+{"info":"rx5808 scanner ready","node_id":"RX01","receiver":"rx5808","channels":40,"threshold":600,"peak_pick":1}
 ```
 
 If nothing appears for >5 s, check USB-CDC enumeration: the XIAO waits up to 3 s for a host connection before emitting. Replug and reopen the monitor.
 
-**Step 6 — Calibrate threshold (first-time only)**
+**Step 6 — Calibrate (first-time only)**
 
-With no FPV transmitter powered:
+*Threshold.* With no FPV transmitter powered:
 1. Watch the monitor for 30 seconds. Any `rssi_raw` values that appear are your **noise floor**.
 2. Set `RSSI_THRESHOLD` to (noise floor + 200) in `rx5808.h`. Higher values reduce false positives at the cost of missing weaker signals.
 3. Reflash (Step 4). Power a known FPV transmitter nearby and confirm detections.
+
+*dBm curve (needed for multi-station fixes).* The station converts the calibrated
+ADC millivolt reading to `rssi_dbm` with a two-point line. The defaults are an
+unmeasured approximation of a typical RX5808; two stations with different
+curves will disagree, and the mapper's position solver only sees their
+disagreement as noise. To calibrate: put a VTX on a known channel through a step
+attenuator (or at two known distances in the open), note the `rssi_mv` the
+station prints at a weak level and at a strong level ~50 dB apart, enter those
+(mV, dBm) pairs as `RSSI_CAL_MV_LO/DBM_LO` and `RSSI_CAL_MV_HI/DBM_HI`, and
+reflash. Use `RSSI_CAL_OFFSET_DB` for a per-station antenna/cable trim so the
+fleet agrees. The heartbeat carries the resulting `threshold_dbm`, which is what
+the mapper uses when this station is silent about an emitter.
 
 **Step 7 — Connect to mesh-mapper**
 
@@ -209,13 +221,19 @@ All tuneable constants are at the top of the relevant source files:
 
 | Constant | File | Default | Description |
 |----------|------|---------|-------------|
-| `RSSI_THRESHOLD` | `src/rx5808.h` | `600` | ADC count above which a signal is reported (RX5808 RSSI spans ~0–1320 counts) |
-| `RSSI_SAMPLES` | `src/rx5808.h` | `10` | ADC reads averaged per RSSI measurement |
+| `RSSI_THRESHOLD` | `src/rx5808.h` | `600` | Raw ADC count above which a channel is reported (RX5808 RSSI spans ~0–1320 counts). Raw counts differ between an S3 and a C5; the threshold only gates reporting, the dBm value is what the mapper compares |
+| `RSSI_SAMPLES` | `src/rx5808.h` | `10` | ADC reads per dwell read (raw count + calibrated millivolts each) |
 | `TUNE_SETTLE_MS` | `src/rx5808.h` | `30` | ms to wait for RX5808 PLL after tuning |
-| `NODE_ID` | `src/main.cpp` | `"RX01"` | Change per device for multi-node dedup |
+| `RSSI_CAL_MV_LO` / `RSSI_CAL_DBM_LO` | `src/rx5808.h` | `450` / `-95.0` | Lower calibration point of the mV → dBm line (see [Calibrate](#step-6--calibrate-first-time-only)) |
+| `RSSI_CAL_MV_HI` / `RSSI_CAL_DBM_HI` | `src/rx5808.h` | `1100` / `-20.0` | Upper calibration point |
+| `RSSI_CAL_OFFSET_DB` | `src/rx5808.h` | `0.0` | Per-station trim (antenna/cable gain) added to every dBm value |
+| `NODE_ID` | `src/main.cpp` | `"RX01"` | Change per device; must equal the Meshtastic node name |
 | `ENABLE_MESH_RELAY` | `src/main.cpp` | `1` | Set `0` to disable Heltec UART relay |
-| `MIN_DWELL_HITS` | `src/main.cpp` | `2` | Both reads must clear threshold to confirm a hit |
-| `REPORT_INTERVAL_MS` | `src/main.cpp` | `5000` | Rate-limit re-reports of the same channel (ms) |
+| `MIN_DWELL_HITS` | `src/main.cpp` | `2` | Every dwell read in a channel visit must clear the threshold |
+| `REPORT_INTERVAL_MS` | `src/main.cpp` | `5000` | Minimum ms between USB re-reports of the same channel |
+| `MESH_REPORT_INTERVAL_MS` | `src/main.cpp` | `10000` | Minimum ms between mesh re-reports of the same channel (LoRa airtime) |
+| `HEARTBEAT_INTERVAL_MS` / `MESH_HEARTBEAT_INTERVAL_MS` | `src/main.cpp` | `60000` / `120000` | Heartbeat cadence on USB / mesh |
+| `PEAK_PICK` / `PEAK_WINDOW_MHZ` | `src/main.cpp` | `1` / `20` | Report only the strongest channel of each cluster of adjacent hits (one VTX = one key per station). `0` restores one report per channel |
 
 ### Channel Map
 
@@ -237,22 +255,30 @@ This is the interface between the branches. `mesh-mapper.py` on `main` consumes
 exactly these lines, whether they arrive over USB or through the home node from the
 mesh. **Keep this section and the mapper in step.**
 
-### Detection line
+### Detection line (USB)
 
 One JSON object per line on USB Serial (115200), whenever a channel clears the
-threshold and the per-channel `REPORT_INTERVAL_MS` has elapsed:
+threshold, is the strongest of its cluster of adjacent channels (`PEAK_PICK`),
+and the per-channel `REPORT_INTERVAL_MS` has elapsed:
 
 ```json
 {
   "type":     "analog_fm",
+  "receiver": "rx5808",
   "mac":      "AF:00:16:1A:52:01",
   "freq_mhz": 5658,
   "band":     "R",
   "ch":       1,
   "rssi_raw": 850,
   "rssi":     850,
+  "rssi_mv":  643,
+  "rssi_dbm": -72.7,
+  "rssi_min": 812,
+  "rssi_max": 891,
+  "rssi_n":   20,
   "basic_id": "5.8G-R1-5658MHz",
-  "node_id":  "RX01"
+  "node_id":  "RX01",
+  "seq":      42
 }
 ```
 
@@ -261,30 +287,55 @@ threshold and the per-channel `REPORT_INTERVAL_MS` has elapsed:
 | `type` | yes, must be `"analog_fm"` | Routes the line around every Remote ID code path: no FAA lookup, no drone/pilot markers, no history deque, 30 s stale timeout, `a-u-G-E-S` + range-ring CoT events |
 | `mac` | yes | Tracking key. Synthetic, locally-administered `AF:00:` prefix + frequency (big-endian MHz) + band ASCII + channel, so every channel is a distinct "device" and never collides with a real Wi-Fi MAC |
 | `node_id` | yes | Looks up the station position (`NODE_LOCATIONS`) and draws the ring there. Must equal the Meshtastic node name |
-| `freq_mhz`, `band`, `ch` | yes | Popup, log line, CoT callsign |
-| `rssi_raw` | yes | Range estimate (`_rssi_to_max_range_m`) and ring colour (green ≥ 1000, amber ≥ 800, red below) |
-| `rssi` | yes (duplicate of `rssi_raw`) | Generic RSSI display shared with Level 2 detections |
-| `basic_id` | yes | Human-readable label in the detection list |
+| `freq_mhz`, `band`, `ch` | yes | Popup, log line, CoT callsign, frequency-derived path loss, emitter clustering (reports within 20 MHz are one emitter) |
+| `rssi_raw` | yes | Raw ADC count. Fallback for `rssi_dbm` on the mapper (RX5808 curve) and ring colour when no dBm is present |
+| `rssi` | on USB (mapper backfills from `rssi_raw`) | Generic RSSI display shared with Level 2 detections |
+| `basic_id` | on USB (mapper backfills from band/ch/freq) | Human-readable label in the detection list |
+| `receiver` | no (defaults to `rx5808`) | Which driver produced the line; log tag and popup |
+| `rssi_dbm` | no, but needed for fusion | Calibrated received power. Drives the single-station ring radius (`_max_range_m`, FSPL at `freq_mhz`), ring colour (green ≥ −60, amber ≥ −75, red below) and the **multi-station position solver** |
+| `rssi_mv` | no | Calibrated ADC millivolts; the number you read off during dBm calibration |
+| `rssi_min`, `rssi_max`, `rssi_n` | no | Sample spread behind the report; the solver down-weights a noisy report |
+| `seq` | no | Per-station report counter, for spotting mesh loss |
+
+### Detection line (mesh relay, Heltec UART)
+
+When `ENABLE_MESH_RELAY` is on, the same hit goes to the Heltec as one compact
+JSON line (`\n`-terminated, no CR, ≤ 190 bytes) at most every
+`MESH_REPORT_INTERVAL_MS`. The home node forwards JSON lines to the mapper
+unchanged (Level 1 lines bypass its MAC dedup) and tags non-JSON lines `[MESH]`,
+which the mapper drops, so the relay line **must** be JSON:
+
+```json
+{"type":"analog_fm","mac":"AF:00:16:1A:52:01","freq_mhz":5658,"band":"R","ch":1,"rssi_raw":850,"rssi_dbm":-72.7,"rssi_min":812,"rssi_max":891,"node_id":"RX01","seq":42}
+```
+
+The mapper backfills `rssi`, `basic_id` and `receiver` for these.
 
 ### Heartbeat and info lines
 
-Every 60 s, and once at boot, the station emits a status line. The mapper drops
-any line that carries `heartbeat`, `status` or `info` and none of the detection
-keys, so these never create a phantom device:
+Every 60 s on USB and every 120 s on the mesh, plus once at boot, the station
+emits a status line. The mapper drops any line that carries `heartbeat`,
+`status` or `info` and none of the detection keys, so these never create a
+phantom device, but it first records the station as **alive** with its
+`threshold_dbm`: an alive station that does not report an emitter tells the
+position solver the emitter is not within that station's range.
 
 ```json
-{"heartbeat":true,"node_id":"RX01","scanning":true,"channels":40,"threshold":600}
-{"info":"RX5808 scanner ready","node_id":"RX01","channels":40,"threshold":600}
+{"heartbeat":true,"node_id":"RX01","receiver":"rx5808","scanning":true,"channels":40,"threshold":600,"threshold_dbm":-94.5,"temp_c":41.2,"uptime_s":3600,"seq":42}
+{"info":"rx5808 scanner ready","node_id":"RX01","receiver":"rx5808","channels":40,"threshold":600,"peak_pick":1}
 ```
 
-### Mesh relay line (Heltec UART)
+### What the mapper does with several stations
 
-When `ENABLE_MESH_RELAY` is on, the same hit is also sent to the Heltec as one
-compact text line, `\n`-terminated, no CR:
-
-```
-AnalogFM: R1 5658MHz rssi=850 [RX01]
-```
+Each station on its own still gets a range ring. When two or more positioned
+stations report the same emitter (same or adjacent frequency) within the fusion
+window, the mapper solves for the emitter position **and** its unknown
+transmitter power from the differences between the stations' `rssi_dbm`
+(log-distance model, grid search), adds the "not within range of here" constraint
+from every alive-but-silent station, and publishes a 🎯 fix with a 90 %
+confidence circle at `/api/analog_fixes`. Fixes are also sent to TAK. Tuning is
+live at `/api/analog_fusion`. Park stations densely: the fix accuracy is a
+fraction of the station spacing.
 
 ### Integration with mesh-mapper.py
 
@@ -310,12 +361,21 @@ POST /api/node_location  { "node_id": "RX01", "lat": 25.7617, "lon": -80.1918 }
 ```
 
 Differences from Level 2 (Remote ID) detections in the mapper:
-- `type: "analog_fm"` is logged at INFO level with band/channel/RSSI and skips the FAA lookup.
-- Range rings are colored by signal strength: green ≥ 1000, amber ≥ 800, red below (within the RX5808's ~0–1320 ADC-count range).
-- Each detection is also forwarded to ATAK/WinTAK as two CoT events: an `a-u-G-E-S` sensor marker and a `u-r-b-c-c` range ring shape.
+- `type: "analog_fm"` is logged at INFO level with band/channel/RSSI/dBm and skips the FAA lookup.
+- Range rings are colored by received power: green ≥ −60 dBm, amber ≥ −75 dBm, red below (raw-count thresholds 1000/800 only when no dBm is available).
+- Each detection is also forwarded to ATAK/WinTAK as two CoT events: an `a-u-G-E-S` sensor marker and a `u-r-b-c-c` range ring shape; multi-station fixes add an `a-u-A-M-F-U-M` marker plus a confidence circle.
 - A station silent for 30 s is marked inactive (Level 2 detections get 3 min).
 
 ---
+
+## 🧭 **Station v2: direction finding + video fingerprint**
+
+The next Level 1 station hardware keeps the RX5808 and adds four sector patch
+antennas behind an RF switch (amplitude-comparison bearing, ~±15°) and a video
+sync separator on the RX5808's unused video output (confirms a real analog video
+carrier, PAL/NTSC fingerprint, kills Wi-Fi false positives). Parts list, pin
+budget, power budget, wiring and block diagram are in
+[`docs/LEVEL1-V2-HARDWARE.md`](docs/LEVEL1-V2-HARDWARE.md).
 
 ## 🗺️ **RX3364 3.3 GHz roadmap**
 

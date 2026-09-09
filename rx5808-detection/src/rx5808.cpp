@@ -22,6 +22,13 @@ const FPVChannel FPV_CHANNELS[] = {
 // Catch mismatches between the #define and the actual array at build time.
 static_assert(sizeof(FPV_CHANNELS) / sizeof(FPV_CHANNELS[0]) == FPV_CHANNEL_COUNT,
               "FPV_CHANNEL_COUNT does not match FPV_CHANNELS array length");
+static_assert(RSSI_CAL_MV_HI > RSSI_CAL_MV_LO,
+              "RSSI calibration points must be in increasing mV order");
+
+// Measured mV-per-count ratio for THIS board's ADC, refined on every stats
+// read. Lets raw thresholds be expressed in dBm without knowing which chip
+// we are on.
+static float g_mv_per_count = RSSI_NOMINAL_MV_PER_COUNT;
 
 // Shift 'bits' bits of 'data' out LSB-first on the bit-bang SPI bus.
 static void spi_shift_out(uint32_t data, int bits) {
@@ -70,12 +77,43 @@ void rx5808_set_frequency(uint16_t freq_mhz) {
     digitalWrite(RX5808_CS_PIN, HIGH);
 }
 
-int rx5808_read_rssi() {
-    long sum = 0;
+void rx5808_read_rssi_stats(RssiStats* out) {
+    out->reset();
     for (int i = 0; i < RSSI_SAMPLES; i++) {
-        sum += analogRead(RX5808_RSSI_PIN);
+        // Raw counts keep the historical threshold/colour scale; the
+        // eFuse-calibrated millivolt read is what makes S3 and C5 stations
+        // comparable and feeds the dBm conversion.
+        int raw = analogRead(RX5808_RSSI_PIN);
+        int mv  = (int)analogReadMilliVolts(RX5808_RSSI_PIN);
+        out->sum_raw += raw;
+        out->sum_mv  += mv;
+        if (raw < out->min_raw) out->min_raw = raw;
+        if (raw > out->max_raw) out->max_raw = raw;
+        out->n++;
         delayMicroseconds(200);
     }
-    return (int)(sum / RSSI_SAMPLES);
+    // Refine the board's mV/count ratio from real signal (ignore near-zero
+    // reads where quantisation dominates).
+    if (out->sum_raw > 200L * out->n) {
+        g_mv_per_count = (float)out->sum_mv / (float)out->sum_raw;
+    }
 }
 
+int rx5808_read_rssi() {
+    RssiStats s;
+    rx5808_read_rssi_stats(&s);
+    return s.mean_raw();
+}
+
+float rx5808_mv_to_dbm(int mv) {
+    const float slope = (RSSI_CAL_DBM_HI - RSSI_CAL_DBM_LO)
+                      / (float)(RSSI_CAL_MV_HI - RSSI_CAL_MV_LO);
+    float dbm = RSSI_CAL_DBM_LO + (mv - RSSI_CAL_MV_LO) * slope + RSSI_CAL_OFFSET_DB;
+    if (dbm < -120.0f) dbm = -120.0f;
+    if (dbm >    0.0f) dbm =    0.0f;
+    return dbm;
+}
+
+float rx5808_raw_to_dbm(int raw) {
+    return rx5808_mv_to_dbm((int)(raw * g_mv_per_count));
+}

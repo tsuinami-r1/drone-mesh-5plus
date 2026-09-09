@@ -1,0 +1,167 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 640" role="img" aria-label="Level 1 station v2 block diagram: four sector patch antennas through an SP4T RF switch into the RX5808; its RSSI, SPI and video lines to the XIAO; the video output through a sync separator to two XIAO counter pins; the XIAO to the Heltec over UART; and a solar, charger, battery, 5 V rail power chain" font-family="IBM Plex Sans, Segoe UI, Helvetica, Arial, sans-serif" font-size="12" style="color:#16202A">
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+    <marker id="arr-rf" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#0F7F73"/>
+    </marker>
+    <marker id="arr-vid" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#C25A1D"/>
+    </marker>
+    <marker id="arr-pwr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#8A6D00"/>
+    </marker>
+  </defs>
+
+  <!-- ===== Sector antennas ===== -->
+  <g stroke="currentColor" fill="none" stroke-width="1.2">
+    <rect x="40" y="70" width="110" height="46" rx="3"/>
+    <rect x="40" y="140" width="110" height="46" rx="3"/>
+    <rect x="40" y="210" width="110" height="46" rx="3"/>
+    <rect x="40" y="280" width="110" height="46" rx="3"/>
+  </g>
+  <g fill="currentColor" text-anchor="middle">
+    <text x="95" y="89" font-weight="600">Patch N (0°)</text><text x="95" y="106" font-size="10.5">8 dBi · ~70° beam</text>
+    <text x="95" y="159" font-weight="600">Patch E (90°)</text><text x="95" y="176" font-size="10.5">8 dBi · ~70° beam</text>
+    <text x="95" y="229" font-weight="600">Patch S (180°)</text><text x="95" y="246" font-size="10.5">8 dBi · ~70° beam</text>
+    <text x="95" y="299" font-weight="600">Patch W (270°)</text><text x="95" y="316" font-size="10.5">8 dBi · ~70° beam</text>
+  </g>
+  <!-- coax to switch -->
+  <g stroke="#0F7F73" stroke-width="2.2" fill="none" marker-end="url(#arr-rf)">
+    <path d="M150,93 H185 V158 H222"/>
+    <path d="M150,163 H222"/>
+    <path d="M150,233 H222"/>
+    <path d="M150,303 H185 V238 H222"/>
+  </g>
+  <text x="186" y="132" font-size="10" fill="#0F7F73">equal-length coax</text>
+
+  <!-- ===== SP4T switch ===== -->
+  <rect x="224" y="120" width="130" height="150" rx="4" stroke="currentColor" fill="none" stroke-width="1.2"/>
+  <g fill="currentColor" text-anchor="middle">
+    <text x="289" y="145" font-weight="600">SP4T RF switch</text>
+    <text x="289" y="162" font-size="10.5">SKY13322-375LF /</text>
+    <text x="289" y="176" font-size="10.5">PE42442 · 0.1–6 GHz</text>
+    <text x="289" y="196" font-size="10.5">IL ≈ 0.5 dB · 3.3 V logic</text>
+    <text x="289" y="216" font-size="10.5">switch settle &lt; 1 µs</text>
+    <text x="289" y="256" font-size="10" fill="#0F7F73">RF common</text>
+  </g>
+
+  <!-- switch -> RX5808 -->
+  <path d="M354,195 H418" stroke="#0F7F73" stroke-width="2.2" fill="none" marker-end="url(#arr-rf)"/>
+  <text x="386" y="188" font-size="10" fill="#0F7F73" text-anchor="middle">ANT</text>
+
+  <!-- ===== RX5808 ===== -->
+  <rect x="420" y="120" width="170" height="150" rx="4" stroke="currentColor" fill="none" stroke-width="1.2"/>
+  <g fill="currentColor" text-anchor="middle">
+    <text x="505" y="145" font-weight="600">RX5808 receiver</text>
+    <text x="505" y="162" font-size="10.5">RTC6715 · SPI-modded</text>
+    <text x="505" y="176" font-size="10.5">5645–5945 MHz, 40 ch</text>
+    <text x="505" y="196" font-size="10.5">RSSI 0–1 V analog</text>
+    <text x="505" y="210" font-size="10.5">VIDEO 1 Vpp / 75 Ω</text>
+    <text x="505" y="230" font-size="10.5">3.3 V · ~180 mA</text>
+  </g>
+
+  <!-- ===== Sync separator ===== -->
+  <rect x="420" y="330" width="170" height="92" rx="4" stroke="currentColor" fill="none" stroke-width="1.2"/>
+  <g fill="currentColor" text-anchor="middle">
+    <text x="505" y="354" font-weight="600">Video sync separator</text>
+    <text x="505" y="371" font-size="10.5">LMH1980 (3.3 V, SOT-23)</text>
+    <text x="505" y="385" font-size="10.5">or LM1881 (5 V + divider)</text>
+    <text x="505" y="402" font-size="10.5">CSYNC 15.6 / 15.7 kHz</text>
+    <text x="505" y="415" font-size="10.5">VSYNC 50 / 60 Hz</text>
+  </g>
+  <!-- video path -->
+  <path d="M505,270 V328" stroke="#C25A1D" stroke-width="2" fill="none" marker-end="url(#arr-vid)"/>
+  <text x="512" y="296" font-size="10" fill="#C25A1D">composite video, 0.1 µF</text>
+
+  <!-- ===== XIAO ===== -->
+  <rect x="690" y="90" width="180" height="340" rx="4" stroke="currentColor" fill="none" stroke-width="1.6"/>
+  <g fill="currentColor" text-anchor="middle">
+    <text x="780" y="114" font-weight="600" font-size="13">XIAO ESP32-S3 / C5</text>
+    <text x="780" y="130" font-size="10.5">scan · sector DF · sync count</text>
+  </g>
+  <!-- pin labels inside XIAO left edge -->
+  <g fill="currentColor" font-family="IBM Plex Mono, Consolas, monospace" font-size="10.5">
+    <text x="698" y="164">D10 DATA</text>
+    <text x="698" y="180">D8  CLK</text>
+    <text x="698" y="196">D9  CS</text>
+    <text x="698" y="222">D0  RSSI (ADC)</text>
+    <text x="698" y="252">D1 D2 D3 SEL</text>
+    <text x="698" y="332">D6  CSYNC (PCNT)</text>
+    <text x="698" y="348">D7  VSYNC</text>
+    <text x="698" y="395">D4  TX</text>
+    <text x="698" y="411">D5  RX</text>
+  </g>
+
+  <!-- SPI: XIAO -> RX5808 -->
+  <path d="M688,178 H600 V160 H592" stroke="currentColor" stroke-width="1.4" fill="none" marker-end="url(#arr)"/>
+  <text x="640" y="172" font-size="10" fill="currentColor" text-anchor="middle">SPI tune</text>
+  <!-- RSSI: RX5808 -> XIAO -->
+  <path d="M590,218 H688" stroke="currentColor" stroke-width="1.4" fill="none" marker-end="url(#arr)"/>
+  <text x="640" y="212" font-size="10" fill="currentColor" text-anchor="middle">RSSI 10 samples</text>
+  <!-- switch select: XIAO -> SP4T (routes under RX5808) -->
+  <path d="M688,248 H612 V300 H289 V272" stroke="currentColor" stroke-width="1.4" fill="none" marker-end="url(#arr)"/>
+  <text x="330" y="313" font-size="10" fill="currentColor">sector select, 4 × per channel</text>
+  <!-- sync outputs -> XIAO -->
+  <path d="M590,362 H640 V328 H688" stroke="#C25A1D" stroke-width="2" fill="none" marker-end="url(#arr-vid)"/>
+  <path d="M590,392 H660 V344 H688" stroke="#C25A1D" stroke-width="2" fill="none" marker-end="url(#arr-vid)"/>
+  <text x="628" y="384" font-size="10" fill="#C25A1D">line / field rate</text>
+
+  <!-- ===== Heltec ===== -->
+  <rect x="930" y="340" width="150" height="90" rx="4" stroke="currentColor" fill="none" stroke-width="1.2"/>
+  <g fill="currentColor" text-anchor="middle">
+    <text x="1005" y="364" font-weight="600">Heltec LoRa 32 V3</text>
+    <text x="1005" y="381" font-size="10.5">Meshtastic, TEXTMSG</text>
+    <text x="1005" y="395" font-size="10.5">name = NODE_ID</text>
+    <text x="1005" y="415" font-size="10.5">5 V · ~80 mA</text>
+  </g>
+  <path d="M870,392 H928" stroke="currentColor" stroke-width="1.4" fill="none" marker-end="url(#arr)"/>
+  <path d="M928,408 H872" stroke="currentColor" stroke-width="1.4" fill="none" marker-end="url(#arr)"/>
+  <text x="899" y="386" font-size="10" fill="currentColor" text-anchor="middle">UART 115200</text>
+  <text x="897" y="430" font-size="9.5" fill="currentColor" text-anchor="middle">JSON ≤ 190 B</text>
+  <!-- mesh out -->
+  <path d="M1005,340 V300" stroke="currentColor" stroke-width="1.4" fill="none" stroke-dasharray="4 3" marker-end="url(#arr)"/>
+  <text x="1005" y="290" font-size="10.5" fill="currentColor" text-anchor="middle">LoRa mesh → home node → mapper</text>
+
+  <!-- ===== Power chain ===== -->
+  <g stroke="currentColor" fill="none" stroke-width="1.2">
+    <rect x="40" y="500" width="130" height="70" rx="3"/>
+    <rect x="230" y="500" width="190" height="70" rx="3"/>
+    <rect x="470" y="500" width="130" height="70" rx="3"/>
+  </g>
+  <g fill="currentColor" text-anchor="middle">
+    <text x="105" y="524" font-weight="600">Solar panel</text>
+    <text x="105" y="541" font-size="10.5">20 W · 18 V nominal</text>
+    <text x="105" y="555" font-size="10.5">south-facing, 30–45° tilt</text>
+    <text x="325" y="524" font-weight="600">Charger / power manager</text>
+    <text x="325" y="541" font-size="10.5">MPPT Li-ion, 5 V / 1 A out</text>
+    <text x="325" y="555" font-size="10.5">(e.g. DFRobot DFR0559)</text>
+    <text x="535" y="524" font-weight="600">Battery</text>
+    <text x="535" y="541" font-size="10.5">4 × 18650 3500 mAh</text>
+    <text x="535" y="555" font-size="10.5">1S4P ≈ 50 Wh</text>
+  </g>
+  <g stroke="#8A6D00" stroke-width="2" fill="none" stroke-dasharray="6 4">
+    <path d="M170,535 H228" marker-end="url(#arr-pwr)"/>
+    <path d="M420,535 H468" marker-end="url(#arr-pwr)"/>
+    <path d="M325,500 V470 H1005 V432" marker-end="url(#arr-pwr)"/>
+    <path d="M780,470 V432" marker-end="url(#arr-pwr)"/>
+    <path d="M690,410 H640 V450 H505 V424" marker-end="url(#arr-pwr)"/>
+  </g>
+  <g fill="#8A6D00" font-size="10">
+    <text x="830" y="465">5 V rail (≈1.3 W total)</text>
+    <text x="330" y="465">3V3 from XIAO LDO → RX5808, switch, sync sep</text>
+  </g>
+
+  <!-- ===== Legend ===== -->
+  <g font-size="10.5">
+    <line x1="700" y1="600" x2="740" y2="600" stroke="#0F7F73" stroke-width="2.2"/>
+    <text x="746" y="604" fill="currentColor">RF 5.8 GHz</text>
+    <line x1="820" y1="600" x2="860" y2="600" stroke="#C25A1D" stroke-width="2"/>
+    <text x="866" y="604" fill="currentColor">video / sync</text>
+    <line x1="940" y1="600" x2="980" y2="600" stroke="#8A6D00" stroke-width="2" stroke-dasharray="6 4"/>
+    <text x="986" y="604" fill="currentColor">power</text>
+    <line x1="1030" y1="600" x2="1060" y2="600" stroke="currentColor" stroke-width="1.4"/>
+    <text x="1064" y="604" fill="currentColor">logic</text>
+  </g>
+</svg>

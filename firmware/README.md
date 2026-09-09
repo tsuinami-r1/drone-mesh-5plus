@@ -43,7 +43,7 @@ esptool.py --chip esp32c5 --port COM<X> --baud 115200 write_flash 0x0 <file>.bin
 On the serial monitor at 115200 you should see, within a few seconds of boot:
 
 ```json
-{"info":"RX5808 scanner ready","node_id":"RX01","channels":40,"threshold":600}
+{"info":"rx5808 scanner ready","node_id":"RX01","receiver":"rx5808","channels":40,"threshold":600,"peak_pick":1}
 ```
 
 followed by a `{"heartbeat":true,...}` line every 60 s and `{"type":"analog_fm",...}`
