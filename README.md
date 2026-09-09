@@ -38,7 +38,9 @@ upstream Remote ID mapper it adds:
 - **XIAO ESP32-C5 dual-band** support, built on the [pioarduino](https://github.com/pioarduino/platform-espressif32)
   platform (Arduino-ESP32 core 3.x)
 - **Level 1 analog FPV stations** (RX5808 today, RX3364 planned, on the
-  `level1-station` branch) feeding the same mapper, drawn as range rings
+  `level1-station` branch) feeding the same mapper: one station draws a range ring,
+  and **two or more produce a position fix** by solving for the emitter's location
+  and its unknown transmitter power from the differences between what they heard
 - **TAK / ATAK / WinTAK** Cursor-on-Target output and inbound operator positions
 - Unattended-operation hardening: watchdog resets, serial reconnect loops, bounded
   over-the-air parsers, per-drone mesh rate limiting, and filtering so serial-side
@@ -92,7 +94,7 @@ branches and meet only at the collection point, where both feed the same
 
 | Tier | What it listens for | Hardware | Branch |
 |------|---------------------|----------|--------|
-| **Level 1** | Analog FPV **video carriers**: 5.8 GHz today (RX5808), 3.3 GHz planned (RX3364). No decoding, RSSI only. Produces a range ring around the station. | XIAO ESP32-S3 or C5 + analog receiver module + Heltec V3 | [`level1-station`](https://github.com/tsuinami-r1/drone-mesh-5plus/tree/level1-station) |
+| **Level 1** | Analog FPV **video carriers**: 5.8 GHz today (RX5808), 3.3 GHz planned (RX3364). No decoding, calibrated signal strength only. One station draws a range ring; several produce a position fix. | XIAO ESP32-S3 or C5 + analog receiver module + Heltec V3 | [`level1-station`](https://github.com/tsuinami-r1/drone-mesh-5plus/tree/level1-station) |
 | **Level 2** | Digital **Remote ID / DJI DroneID / MAVLink** over Wi-Fi and BLE. Decodes drone and pilot GPS. | XIAO ESP32-S3 or C5 + Heltec V3 | **`main`** (this branch) |
 | Collection point | `mesh-mapper.py`, the home node bridge, TAK output, Raspberry Pi installer | Laptop / Raspberry Pi + XIAO S3 `home_node` + Heltec V3 | **`main`** (this branch) |
 
@@ -597,11 +599,25 @@ revisit intervals.
 ## 📡 **Level 1 stations (analog FPV)**
 
 Level 1 stations detect **analog FPV video carriers** (5.645–5.945 GHz today via the
-RX5808; 3.3 GHz via the RX3364 is planned) and report RSSI per channel. They carry no
-drone or pilot GPS, so the mapper draws a **range ring around the station** instead
-of a drone marker. Their firmware, wiring, calibration and the RX3364 roadmap live
-on the [`level1-station`](https://github.com/tsuinami-r1/drone-mesh-5plus/tree/level1-station)
-branch. This section documents only the mapper side of the interface.
+RX5808; 3.3 GHz via the RX3364 is planned) and report calibrated received power per
+channel. They carry no drone or pilot GPS, so a single station gets a **range ring**
+rather than a drone marker — but **two or more stations hearing the same emitter
+produce a position fix**, because the unknown transmitter power cancels out in the
+differences between them (see [Multi-station fixes](#multi-station-fixes-differential-rssi-multilateration)).
+
+Their firmware, wiring, calibration and roadmap live on the
+[`level1-station`](https://github.com/tsuinami-r1/drone-mesh-5plus/tree/level1-station)
+branch:
+
+- [**Build and flash a station**](https://github.com/tsuinami-r1/drone-mesh-5plus/blob/level1-station/README.md#-quick-start) — quick start, wiring, calibration
+- [**Station v2 hardware**](https://github.com/tsuinami-r1/drone-mesh-5plus/blob/level1-station/docs/LEVEL1-V2-HARDWARE.md) — sector direction finding and video fingerprinting, with a [printable bench guide](https://github.com/tsuinami-r1/drone-mesh-5plus/blob/level1-station/docs/Level1-Station-v2-Bench-Guide.pdf)
+
+This section documents only the mapper side of the interface.
+
+> **Deployment note:** fix accuracy is a fraction of the spacing between stations,
+> so Level 1 stations are worth parking **densely** in high-interest locations. A
+> station that is alive but silent about an emitter is itself a measurement — it
+> tells the solver the emitter is not within its range.
 
 ### Level 1 station contract
 
