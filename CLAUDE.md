@@ -44,11 +44,21 @@ fingerprint), one RX5808. There is no omni-antenna "v1" build any more.
   GPIO numbers follow the board's own definition. A non-XIAO board fails with `#error`
 - Pin roles: D0 RSSI (ADC), D1/D2/D3 switch V1/V2/V3, D4/D5 UART, D6 CSYNC, D7 VSYNC,
   D8 CLK, D9 CS, D10 DATA. Resolved GPIOs are tabulated in `config.h` and README
+- **Interchangeability is a hard requirement.** An S3 and a C5 must use the **same
+  external pins**, so either board drops into the same socket on the same carrier, exactly
+  as the Level 2 stations do. The D-label is the contract; only the GPIO number behind it
+  may differ per board. Never resolve a pin-mapping problem by moving a signal to a
+  different physical pad on one of the two boards
 - **C5 caveat**: the variant maps D0=GPIO1, D4=GPIO23, D5=GPIO24, D6=GPIO11, D7=GPIO12.
-  Earlier firmware on this branch hard-coded D0=GPIO2, D4=GPIO6, D5=GPIO7 for the C5,
-  which disagrees. The variant is trusted (its D6/D7 are the C5's UART0 defaults, as
-  the S3's are) pending a continuity test on the first C5 v2 board. Do not "fix" the
-  variant numbers back without that test
+  Earlier firmware on this branch hard-coded D0=GPIO2, D4=GPIO6, D5=GPIO7 for the C5, and
+  the fielded Level 2 firmware (`remoteid-c5-5g` on `main`) still uses GPIO6/GPIO7. The
+  variant is trusted here (its D6/D7 are the C5's UART0 defaults, as the S3's are) pending
+  a measurement. Do not "fix" the variant numbers back without that measurement.
+  **Procedure:** `docs/XIAO-C5-Pin-Map-Test.pdf` — jumper one pad to 3V3 and read which
+  GPIO goes high. If it shows the variant is wrong, override the `PIN_*` macros in
+  `config.h` with the measured numbers for the C5, keeping the D-label names, and apply
+  the whole measured column: D0 drives RSSI and D6/D7 drive the video sync, so a wrong
+  variant breaks detection and the video check, not just the mesh relay
 
 ## Mapper contract (interface to `main`)
 
