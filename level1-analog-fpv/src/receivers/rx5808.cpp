@@ -2,7 +2,7 @@
 
 // Standard FPV bands — Raceband, A, B, E, F.
 // Raceband R7 and Band F8 both land on 5880 MHz (same physical frequency).
-const FPVChannel FPV_CHANNELS[] = {
+const AnalogChannel RX_CHANNELS[] = {
     // Raceband
     {5658, "R", 1}, {5695, "R", 2}, {5732, "R", 3}, {5769, "R", 4},
     {5806, "R", 5}, {5843, "R", 6}, {5880, "R", 7}, {5917, "R", 8},
@@ -19,44 +19,41 @@ const FPVChannel FPV_CHANNELS[] = {
     {5740, "F", 1}, {5760, "F", 2}, {5780, "F", 3}, {5800, "F", 4},
     {5820, "F", 5}, {5840, "F", 6}, {5860, "F", 7}, {5880, "F", 8},
 };
-// Catch mismatches between the #define and the actual array at build time.
-static_assert(sizeof(FPV_CHANNELS) / sizeof(FPV_CHANNELS[0]) == FPV_CHANNEL_COUNT,
-              "FPV_CHANNEL_COUNT does not match FPV_CHANNELS array length");
+static_assert(sizeof(RX_CHANNELS) / sizeof(RX_CHANNELS[0]) == RX_CHANNEL_COUNT,
+              "RX_CHANNEL_COUNT does not match RX_CHANNELS array length");
 static_assert(RSSI_CAL_MV_HI > RSSI_CAL_MV_LO,
               "RSSI calibration points must be in increasing mV order");
 
 // Measured mV-per-count ratio for THIS board's ADC, refined on every stats
-// read. Lets raw thresholds be expressed in dBm without knowing which chip
-// we are on.
+// read, so raw thresholds can be expressed in dBm without knowing the chip.
 static float g_mv_per_count = RSSI_NOMINAL_MV_PER_COUNT;
 
 // Shift 'bits' bits of 'data' out LSB-first on the bit-bang SPI bus.
 static void spi_shift_out(uint32_t data, int bits) {
     for (int i = 0; i < bits; i++) {
-        digitalWrite(RX5808_CLK_PIN, LOW);
-        digitalWrite(RX5808_DATA_PIN, (data >> i) & 1);
+        digitalWrite(PIN_RX_CLK, LOW);
+        digitalWrite(PIN_RX_DATA, (data >> i) & 1);
         delayMicroseconds(2);
-        digitalWrite(RX5808_CLK_PIN, HIGH);
+        digitalWrite(PIN_RX_CLK, HIGH);
         delayMicroseconds(2);
     }
-    digitalWrite(RX5808_CLK_PIN, LOW);
+    digitalWrite(PIN_RX_CLK, LOW);
 }
 
-void rx5808_init() {
-    pinMode(RX5808_DATA_PIN, OUTPUT);
-    pinMode(RX5808_CLK_PIN,  OUTPUT);
-    pinMode(RX5808_CS_PIN,   OUTPUT);
+void rx_init() {
+    pinMode(PIN_RX_DATA, OUTPUT);
+    pinMode(PIN_RX_CLK,  OUTPUT);
+    pinMode(PIN_RX_CS,   OUTPUT);
+    digitalWrite(PIN_RX_DATA, LOW);
+    digitalWrite(PIN_RX_CLK,  LOW);
+    digitalWrite(PIN_RX_CS,   HIGH);  // deselected
 
-    digitalWrite(RX5808_DATA_PIN, LOW);
-    digitalWrite(RX5808_CLK_PIN,  LOW);
-    digitalWrite(RX5808_CS_PIN,   HIGH);  // deselected
-
-    // Per-pin attenuation: covers the full 0–3.3V RX5808 RSSI output range.
-    analogSetPinAttenuation(RX5808_RSSI_PIN, ADC_11db);
+    // Per-pin attenuation: covers the full 0–1 V RX5808 RSSI swing with margin.
+    analogSetPinAttenuation(PIN_RSSI, ADC_11db);
     analogReadResolution(12);
 }
 
-void rx5808_set_frequency(uint16_t freq_mhz) {
+void rx_tune(uint16_t freq_mhz) {
     // Synthesizer Register B (RTC6715) is a SPLIT field, not a flat value:
     //   bits [6:0]  = A counter (7 bits)
     //   bits [19:7] = N counter (13 bits)
@@ -72,19 +69,18 @@ void rx5808_set_frequency(uint16_t freq_mhz) {
     //   bits [24:5] = 20-bit register data
     uint32_t spi_word = 0x01u | (1u << 4) | ((uint32_t)reg_val << 5);
 
-    digitalWrite(RX5808_CS_PIN, LOW);
+    digitalWrite(PIN_RX_CS, LOW);
     spi_shift_out(spi_word, 25);
-    digitalWrite(RX5808_CS_PIN, HIGH);
+    digitalWrite(PIN_RX_CS, HIGH);
 }
 
-void rx5808_read_rssi_stats(RssiStats* out) {
+void rx_read_rssi_stats(RssiStats* out) {
     out->reset();
     for (int i = 0; i < RSSI_SAMPLES; i++) {
-        // Raw counts keep the historical threshold/colour scale; the
-        // eFuse-calibrated millivolt read is what makes S3 and C5 stations
-        // comparable and feeds the dBm conversion.
-        int raw = analogRead(RX5808_RSSI_PIN);
-        int mv  = (int)analogReadMilliVolts(RX5808_RSSI_PIN);
+        // Raw counts keep the threshold scale; the eFuse-calibrated millivolt
+        // read is what makes S3 and C5 stations comparable and feeds dBm.
+        int raw = analogRead(PIN_RSSI);
+        int mv  = (int)analogReadMilliVolts(PIN_RSSI);
         out->sum_raw += raw;
         out->sum_mv  += mv;
         if (raw < out->min_raw) out->min_raw = raw;
@@ -99,13 +95,7 @@ void rx5808_read_rssi_stats(RssiStats* out) {
     }
 }
 
-int rx5808_read_rssi() {
-    RssiStats s;
-    rx5808_read_rssi_stats(&s);
-    return s.mean_raw();
-}
-
-float rx5808_mv_to_dbm(int mv) {
+float rx_mv_to_dbm(int mv) {
     const float slope = (RSSI_CAL_DBM_HI - RSSI_CAL_DBM_LO)
                       / (float)(RSSI_CAL_MV_HI - RSSI_CAL_MV_LO);
     float dbm = RSSI_CAL_DBM_LO + (mv - RSSI_CAL_MV_LO) * slope + RSSI_CAL_OFFSET_DB;
@@ -114,6 +104,6 @@ float rx5808_mv_to_dbm(int mv) {
     return dbm;
 }
 
-float rx5808_raw_to_dbm(int raw) {
-    return rx5808_mv_to_dbm((int)(raw * g_mv_per_count));
+float rx_raw_to_dbm(int raw) {
+    return rx_mv_to_dbm((int)(raw * g_mv_per_count));
 }
