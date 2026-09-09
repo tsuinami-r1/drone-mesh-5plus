@@ -1,4 +1,4 @@
-# Firmware Binaries
+# Firmware Binaries — Level 2 stations and home node
 
 Pre-built `.bin` files for flashing without PlatformIO.
 
@@ -9,7 +9,9 @@ Pre-built `.bin` files for flashing without PlatformIO.
 > | Setting | Default | Where | Why it matters |
 > |---|---|---|---|
 > | `WIFI_COUNTRY_CC` / `WIFI_CHAN_START` / `WIFI_CHAN_COUNT` | `HK`, 1, 13 | top of each detection `main.cpp` | Bounds which channels are scanned. `1–13` suits HK/EU; US/FCC is `1, 11`. Nodes are receive-only, so this has no transmit implications. |
-> | `NODE_ID` | `"RX01"` | `rx5808-detection/src/main.cpp` | Must be **unique per node**, and must match the paired Meshtastic node's shortName/longName for range rings to resolve. Flashing several RX5808 nodes from the same binary makes them all claim `RX01`. |
+
+Level 1 (analog FPV, RX5808) binaries are on the `level1-station` branch under
+`firmware/`, with their own `NODE_ID` caveat.
 
 ## Binary → Source Mapping
 
@@ -21,8 +23,6 @@ Pre-built `.bin` files for flashing without PlatformIO.
 | `xiao-s3-dualcore.bin` | `remoteid-mesh-dualcore` | `seeed_xiao_esp32s3` | XIAO ESP32-S3 | 2.4GHz, classic BLE, dual-core tasks |
 | `xiao-s3-node-remote.bin` | `node-mode-dualcore` | `remote_node` | XIAO ESP32-S3 | Detection node, sends JSON to Heltec mesh |
 | `xiao-s3-node-home.bin` | `node-mode-dualcore` | `home_node` | XIAO ESP32-S3 | Home node, UART bridge only (no detection) |
-| `rx5808-s3.bin` | `rx5808-detection` | `seeed_xiao_esp32s3` | XIAO ESP32-S3 + RX5808 | 5.8GHz analog FPV sweep. **Set `NODE_ID` first** (see above). |
-| `rx5808-c5.bin` | `rx5808-detection` | `seeed_xiao_esp32c5` | XIAO ESP32-C5 + RX5808 | As above, C5 pinout |
 
 ## Where PlatformIO puts the built binary
 
@@ -35,8 +35,6 @@ remoteid-mesh/.pio/build/seeed_xiao_esp32s3/firmware.bin         →  xiao-s3-si
 remoteid-mesh-dualcore/.pio/build/seeed_xiao_esp32s3/firmware.bin →  xiao-s3-dualcore.bin
 node-mode-dualcore/.pio/build/remote_node/firmware.bin           →  xiao-s3-node-remote.bin
 node-mode-dualcore/.pio/build/home_node/firmware.bin             →  xiao-s3-node-home.bin
-rx5808-detection/.pio/build/seeed_xiao_esp32s3/firmware.bin      →  rx5808-s3.bin
-rx5808-detection/.pio/build/seeed_xiao_esp32c5/firmware.bin      →  rx5808-c5.bin
 ```
 
 ## Flashing without PlatformIO (esptool)

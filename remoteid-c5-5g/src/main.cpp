@@ -39,7 +39,7 @@
 // ============================================================================
 // The same physical D4/D5 header pins on both boards, so the existing S3
 // carrier PCBs fit a C5 unchanged. The GPIO numbers behind those labels differ
-// per board (matches rx5808-detection).
+// per board (matches the Level 1 station firmware on the level1-station branch).
 
 #if defined(CONFIG_IDF_TARGET_ESP32C5) || defined(ARDUINO_XIAO_ESP32C5)
   const int SERIAL1_TX_PIN = 6;   // D4 on XIAO ESP32-C5 → Heltec RX
