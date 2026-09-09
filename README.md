@@ -11,7 +11,9 @@
 
 Real-time Remote ID, DJI DroneID, MAVLink & analog-FPV mapping over a Meshtastic-linked mesh of unattended ESP32 nodes
 
-[🚀 Quick Start](#-quick-start) • [📦 Firmware](#-firmware-variants) • [🔧 Hardware](#-hardware-setup) • [🛠️ API Reference](#️-api-reference)
+Branch `main`: **Level 2 stations** (Wi-Fi/BLE Remote ID) and the `mesh-mapper.py` collection point. **Level 1 stations** (analog FPV receivers) live on branch [`level1-station`](https://github.com/tsuinami-r1/drone-mesh-5plus/tree/level1-station).
+
+[🏗️ Station tiers](#️-station-tiers) • [🚀 Quick Start](#-quick-start) • [📦 Firmware](#-firmware-variants) • [🔧 Hardware](#-hardware-setup) • [🛠️ API Reference](#️-api-reference)
 
 <img src="eye.png" alt="Drone Detection Eye" style="width:50%; height:25%;">
 
@@ -35,7 +37,8 @@ upstream Remote ID mapper it adds:
   with hit-triggered dwell, instead of a fixed channel
 - **XIAO ESP32-C5 dual-band** support, built on the [pioarduino](https://github.com/pioarduino/platform-espressif32)
   platform (Arduino-ESP32 core 3.x)
-- **RX5808 analog FPV detection** nodes with range rings on the map
+- **Level 1 analog FPV stations** (RX5808 today, RX3364 planned, on the
+  `level1-station` branch) feeding the same mapper, drawn as range rings
 - **TAK / ATAK / WinTAK** Cursor-on-Target output and inbound operator positions
 - Unattended-operation hardening: watchdog resets, serial reconnect loops, bounded
   over-the-air parsers, per-drone mesh rate limiting, and filtering so serial-side
@@ -79,6 +82,32 @@ picture of who is flying and from where, without ever tipping them off.
 **Scale:** a multi-node, city-wide mesh running a mix of XIAO ESP32-S3 and ESP32-C5
 detection nodes simultaneously, each named to match its paired Meshtastic node.
 
+---
+
+## 🏗️ **Station tiers**
+
+The network fields two distinct kinds of station. They are developed on separate
+branches and meet only at the collection point, where both feed the same
+`mesh-mapper.py`.
+
+| Tier | What it listens for | Hardware | Branch |
+|------|---------------------|----------|--------|
+| **Level 1** | Analog FPV **video carriers**: 5.8 GHz today (RX5808), 3.3 GHz planned (RX3364). No decoding, RSSI only. Produces a range ring around the station. | XIAO ESP32-S3 or C5 + analog receiver module + Heltec V3 | [`level1-station`](https://github.com/tsuinami-r1/drone-mesh-5plus/tree/level1-station) |
+| **Level 2** | Digital **Remote ID / DJI DroneID / MAVLink** over Wi-Fi and BLE. Decodes drone and pilot GPS. | XIAO ESP32-S3 or C5 + Heltec V3 | **`main`** (this branch) |
+| Collection point | `mesh-mapper.py`, the home node bridge, TAK output, Raspberry Pi installer | Laptop / Raspberry Pi + XIAO S3 `home_node` + Heltec V3 | **`main`** (this branch) |
+
+**Branch rules**
+
+- `main` is the only home of `mesh-mapper.py`. It must keep accepting detections
+  from **both** tiers; the Level 1 side of that interface is the
+  [Level 1 station contract](#-level-1-stations-analog-fpv) below.
+- `level1-station` holds only Level 1 firmware and never carries a copy of the
+  mapper. A Level 1 change that alters the emitted JSON keys lands together with the
+  matching `mesh-mapper.py` change here.
+- Both tiers share the same Heltec / Meshtastic backhaul, the same D4/D5 UART
+  wiring and the same Meshtastic node-naming rule, so one carrier PCB and one mesh
+  serve both.
+
 ### Protocol coverage
 
 | Protocol | Transport | OUI / identifier | Firmware support |
@@ -90,7 +119,7 @@ detection nodes simultaneously, each named to match its paired Meshtastic node.
 | **DJI DroneID** | **802.11 beacon (IE 221)** | **`26:37:12`** | **All variants** |
 | DJI OcuSync / O3 / O4 | OFDM (~2.4295 GHz video band) | — | ❌ Requires SDR |
 | **MAVLink GPS** | **802.11 data frame (UDP/14550)** | **any MAC** | **All variants** |
-| **Analog FPV video** | **5.645–5.945 GHz FM** | **synthetic `AF:00:…` MAC** | **`rx5808-detection`** |
+| **Analog FPV video** | **5.645–5.945 GHz FM** (3.3 GHz planned) | **synthetic `AF:00:…` MAC** | **Level 1 stations, branch `level1-station`** |
 
 > **DJI Wi-Fi coverage caveat:** Modern DJI aircraft (Mini 3 Pro, Air 3, Mavic 3 series) primarily use OcuSync/O3/O4 for their DroneID downlink, which is OFDM in the video band and **cannot be demodulated by an ESP32**. The Wi-Fi IE221 DroneID broadcast (`26:37:12`) is present on older and budget models; treat it as partial fleet coverage, not "all DJI".
 
@@ -162,7 +191,7 @@ Python script.
 | Field mesh radio | **Heltec WiFi LoRa 32 V3** running Meshtastic, wired to each detection node | one per node |
 | Home receiver | one more Heltec V3 + one XIAO ESP32-S3 flashed as the `home_node` UART bridge | 1 |
 | Host | Any Linux / macOS / Windows machine or Raspberry Pi with Python 3.7+ | 1 |
-| Optional | **RX5808** 5.8 GHz receiver module for analog FPV nodes | per FPV node |
+| Optional | **Level 1 station** (XIAO + RX5808 analog receiver), built from the `level1-station` branch | per FPV site |
 | Build machine | A computer with VS Code and a USB-C cable | 1 |
 
 ### Step 1 — Install the toolchain: VS Code + pioarduino
@@ -212,11 +241,12 @@ workspace root, so opening the repo root shows no build targets.
 | XIAO ESP32-C5 | `remoteid-c5-5g/` | `seeed_xiao_esp32c5` | Dual-band 2.4 + 5 GHz, BLE 5 Coded PHY. **Preferred node.** |
 | XIAO ESP32-S3 | `remoteid-c5-5g/` | `seeed_xiao_esp32s3` | 2.4 GHz, NimBLE + Coded PHY. **Preferred S3 build.** |
 | XIAO ESP32-S3 (home receiver) | `node-mode-dualcore/` | `home_node` | UART→USB bridge with dedup, no detection. Plugs into the host. |
-| XIAO ESP32-S3 or C5 + RX5808 | `rx5808-detection/` | `seeed_xiao_esp32s3` / `seeed_xiao_esp32c5` | Analog FPV sweep. See [RX5808](#-rx5808-58ghz-analog-fm-detection-rx5808-detection). |
 
 The remaining projects (`remoteid-mesh`, `remoteid-mesh-dualcore`, the
 `node-mode-dualcore` `remote_node` env) are older S3-only detection builds that are
-kept working; see [Firmware variants](#-firmware-variants).
+kept working; see [Firmware variants](#-firmware-variants). Level 1 (analog FPV)
+station firmware is not on this branch: check out `level1-station` and open its
+`rx5808-detection/` folder instead.
 
 The first time a project opens, pioarduino downloads the platform, toolchains and
 libraries (several hundred MB). Let it finish before building.
@@ -229,12 +259,8 @@ cannot be changed afterwards.
 - **Regulatory domain** (every detection `main.cpp`, near the top): set
   `WIFI_COUNTRY_CC`, `WIFI_CHAN_START`, `WIFI_CHAN_COUNT` for your jurisdiction. See
   [Regulatory domain](#regulatory-domain).
-- **`NODE_ID`** (`rx5808-detection/src/main.cpp`): unique per RX5808 node, and it
-  **must equal the paired Meshtastic node's shortName/longName** for range rings to
-  resolve. Wi-Fi/BLE detection nodes derive their `node_id` from the chip MAC and need
-  no edit.
-- **`ENABLE_MESH_RELAY`** (`rx5808-detection/src/main.cpp`): set to `0` for a
-  USB-only RX5808 node with no Heltec attached.
+- Wi-Fi/BLE detection nodes derive their `node_id` from the chip MAC and need no
+  edit. (Level 1 stations set a `NODE_ID` by hand; see the `level1-station` README.)
 
 ### Step 4 — Build, flash, verify
 
@@ -265,15 +291,14 @@ UART:  TX=GPIO6, RX=GPIO7 → Heltec
 [SCAN] Channel hopping: 8 primary + 10 secondary, dwell 50 ms
 ```
 
-(`TX=GPIO5, RX=GPIO6`, `3 primary` and `dwell 200 ms` on an S3.) An RX5808 node prints
-`{"info":"RX5808 scanner ready", ...}` instead. Any
+(`TX=GPIO5, RX=GPIO6`, `3 primary` and `dwell 200 ms` on an S3.) Any
 `channel N rejected by regulatory domain` line means Step 3 was skipped.
 
 > **ESP32-C5 boot mode:** if the upload fails to connect, hold **BOOT**, tap
 > **RESET**, release **BOOT**, then re-run Upload. The S3 does not need this.
 
 > **No toolchain at all?** `firmware/` holds prebuilt default-configuration
-> binaries for all eight targets and `esptool` flash commands; see
+> binaries for all six Level 2 targets and `esptool` flash commands; see
 > [`firmware/README.md`](firmware/README.md). Remember the defaults above are baked in.
 
 ### Step 5 — Wire the node to its Heltec and configure Meshtastic
@@ -296,7 +321,7 @@ meshtastic --set serial.enabled true \
 ```
 
 Then **name the Meshtastic node.** Set its shortName (and/or longName) to the node's
-identity — for RX5808 nodes exactly the firmware `NODE_ID`, e.g. `RX01`:
+identity — for Level 1 stations exactly the firmware `NODE_ID`, e.g. `RX01`:
 
 ```bash
 meshtastic --set-owner "RX01" --set-owner-short "RX01"
@@ -315,8 +340,8 @@ range ring in the wrong place. All Heltecs must share the same channel and key.
    detections from the mesh to USB, and only forwards lines prefixed `MESH:` in the
    other direction, so nothing the host emits can leak onto the mesh.
 
-An RX5808 node or a detection node can also be plugged **directly** into the host by
-USB for bench testing; the mapper reads the same JSON from either source.
+A Level 1 station or a detection node can also be plugged **directly** into the host
+by USB for bench testing; the mapper reads the same JSON from either source.
 
 ### Step 7 — Install and run the mapper
 
@@ -369,7 +394,9 @@ All detection variants share the same parsers (`opendroneid.c`, `odid_wifi.h`,
 | `node-mode-dualcore/` | `remote_node`, `home_node` | S3 | pioarduino 55.03.39 | Field node + the **home UART bridge** with 500 ms multi-node dedup. |
 | `remoteid-mesh-dualcore/` | `seeed_xiao_esp32s3` | S3 | pioarduino stable | S3 detection with Wi-Fi and BLE on separate cores. Classic BLE. |
 | `remoteid-mesh/` | `seeed_xiao_esp32s3`, `seeed_xiao_esp32c3` | S3, C3 | stock `espressif32` | Original single-core build. C3 has no BLE Remote ID. Legacy. |
-| `rx5808-detection/` | `seeed_xiao_esp32s3`, `seeed_xiao_esp32c5` | C5, S3 | pioarduino 55.03.39 | Analog 5.8 GHz FPV sweep with optional Heltec relay. |
+
+Level 1 (analog FPV) firmware is maintained on the `level1-station` branch and is
+deliberately absent here; see [Station tiers](#️-station-tiers).
 
 Prebuilt binaries for every env, the binary→env mapping, and `esptool` flashing are
 documented in [`firmware/README.md`](firmware/README.md). The node-mode home/remote
@@ -432,8 +459,8 @@ behind those labels differ per board and are selected at compile time.
 |----------|-------|---------------------|---------------------|
 | `remoteid-c5-5g` | ESP32-S3 | D4 (GPIO5) | D5 (GPIO6) |
 | `remoteid-c5-5g` | ESP32-C5 | D4 (GPIO6) | D5 (GPIO7) |
-| `rx5808-detection` | ESP32-S3 | D4 (GPIO5) | D5 (GPIO6) |
-| `rx5808-detection` | ESP32-C5 | D4 (GPIO6) | D5 (GPIO7) |
+| Level 1 `rx5808-detection` (branch `level1-station`) | ESP32-S3 | D4 (GPIO5) | D5 (GPIO6) |
+| Level 1 `rx5808-detection` (branch `level1-station`) | ESP32-C5 | D4 (GPIO6) | D5 (GPIO7) |
 | `node-mode-dualcore` (remote and home) | ESP32-S3 | D4 (GPIO5) | D5 (GPIO6) |
 | `remoteid-mesh-dualcore` | ESP32-S3 | D4 (GPIO5) | D5 (GPIO6) |
 | `remoteid-mesh` (legacy) | ESP32-S3 | D5 (GPIO6) | D8 (GPIO7) |
@@ -567,133 +594,20 @@ revisit intervals.
 
 ---
 
-## 📡 **RX5808 5.8GHz Analog FM Detection** (`rx5808-detection/`)
+## 📡 **Level 1 stations (analog FPV)**
 
-Detects **analog FPV video transmitters** operating in the 5.645–5.945 GHz band.
-Where the other firmware variants look for digital RemoteID broadcasts, this module
-uses the RX5808 analog FM receiver IC to sweep all 40 standard FPV channels and
-report a signal hit whenever RSSI exceeds your calibrated threshold.
+Level 1 stations detect **analog FPV video carriers** (5.645–5.945 GHz today via the
+RX5808; 3.3 GHz via the RX3364 is planned) and report RSSI per channel. They carry no
+drone or pilot GPS, so the mapper draws a **range ring around the station** instead
+of a drone marker. Their firmware, wiring, calibration and the RX3364 roadmap live
+on the [`level1-station`](https://github.com/tsuinami-r1/drone-mesh-5plus/tree/level1-station)
+branch. This section documents only the mapper side of the interface.
 
-> **Use case:** Spot FPV racing drones or surveillance UAVs that are broadcasting
-> analog video but may *not* carry a RemoteID transmitter.
+### Level 1 station contract
 
-### Required Hardware
-
-| Component | Notes |
-|-----------|-------|
-| **Seeed XIAO ESP32-S3** or **XIAO ESP32-C5** | Choose one; the firmware picks the pinout at compile time |
-| **RX5808 module** | 5.8GHz analog FM receiver; ~$5–10, widely available |
-| Jumper wires | 4 signal + 2 power wires |
-
-### Wiring
-
-Use the **D-pin labels** silkscreened on the board — the GPIO numbers differ between variants but the physical connections are identical.
-
-| RX5808 Pin | Board pin | XIAO ESP32-S3 GPIO | XIAO ESP32-C5 GPIO |
-|------------|-----------|-------------------|-------------------|
-| DATA | D10 | GPIO9 | GPIO10 |
-| CLK | D8 | GPIO7 | GPIO8 |
-| CS (active LOW) | D9 | GPIO8 | GPIO9 |
-| RSSI (analog in) | D0 | GPIO1 | GPIO2 |
-| VCC | 3.3V | — | — |
-| GND | GND | — | — |
-
-Optional **Heltec LoRa V3** mesh relay (same physical pins, different GPIOs):
-
-| Signal | Board pin | XIAO ESP32-S3 GPIO | XIAO ESP32-C5 GPIO |
-|--------|-----------|-------------------|-------------------|
-| ESP32 TX → Heltec RX | D4 | GPIO5 | GPIO6 |
-| ESP32 RX ← Heltec TX | D5 | GPIO6 | GPIO7 |
-
-The firmware selects GPIO numbers automatically at compile time based on the target board — no source edits needed.
-
-### Prerequisites
-
-The VS Code + pioarduino toolchain from [Quick Start Step 1](#step-1--install-the-toolchain-vs-code--pioarduino),
-or the PlatformIO CLI. Open the `rx5808-detection/` folder as the project.
-
-### Full Flashing Steps
-
-**Step 1 — Set a unique Node ID before flashing (required for multi-node)**
-
-Open `rx5808-detection/src/main.cpp` and change `NODE_ID` to something unique per device. This must match the Meshtastic node's `shortName`/`longName` for range rings to work.
-
-```cpp
-// Line ~47 in main.cpp — change for each chip you flash
-#define NODE_ID  "RX01"    // e.g. "RX02", "RX03", …
-```
-
-**Step 2 — (Optional) Adjust RSSI threshold**
-
-Open `rx5808-detection/src/rx5808.h`. The default of `600` is a safe starting point; tune after calibration. (The RX5808 RSSI output swings ~0–1 V, which is ~0–1320 ADC counts at 12-bit / ADC_11db — so the threshold must sit inside that range.)
-
-```cpp
-#define RSSI_THRESHOLD   600   // raise if you get false positives
-```
-
-**Step 3 — Wire the hardware**
-
-See the wiring table above. Connect the XIAO to your computer via USB-C.
-
-**Step 4 — Flash**
-
-In VS Code: PlatformIO → Project Tasks → `seeed_xiao_esp32s3` or `seeed_xiao_esp32c5` → **Upload**. Or from the CLI:
-
-```bash
-cd rx5808-detection
-
-# XIAO ESP32-S3
-pio run -e seeed_xiao_esp32s3 --target upload
-
-# XIAO ESP32-C5
-pio run -e seeed_xiao_esp32c5 --target upload
-```
-
-> **ESP32-C5 boot mode:** If upload fails with a connection error, hold **BOOT**, tap **RESET**, release **BOOT**, then immediately re-run the command. This forces the chip into download mode. The S3 does not require this.
-
-**Step 5 — Verify on serial monitor**
-
-```bash
-pio device monitor --baud 115200
-```
-
-You should see within a few seconds:
-```json
-{"info":"RX5808 scanner ready","node_id":"RX01","channels":40,"threshold":600}
-```
-
-If nothing appears for >5 s, check USB-CDC enumeration: the XIAO waits up to 3 s for a host connection before emitting. Replug and reopen the monitor.
-
-**Step 6 — Calibrate threshold (first-time only)**
-
-With no FPV transmitter powered:
-1. Watch the monitor for 30 seconds. Any `rssi_raw` values that appear are your **noise floor**.
-2. Set `RSSI_THRESHOLD` to (noise floor + 200) in `rx5808.h`. Higher values reduce false positives at the cost of missing weaker signals.
-3. Reflash (Step 4). Power a known FPV transmitter nearby and confirm detections.
-
-**Step 7 — Connect to mesh-mapper**
-
-1. Start `mesh-mapper.py` on your server machine.
-2. In the web UI Settings panel, select the XIAO's USB serial port (or let it arrive over the mesh via the home node).
-3. For range-ring display: set the node's Meshtastic URL or manual coordinates (see Integration section below).
-
-### Configuration
-
-All tuneable constants are at the top of the relevant source files:
-
-| Constant | File | Default | Description |
-|----------|------|---------|-------------|
-| `RSSI_THRESHOLD` | `src/rx5808.h` | `600` | ADC count above which a signal is reported (RX5808 RSSI spans ~0–1320 counts) |
-| `RSSI_SAMPLES` | `src/rx5808.h` | `10` | ADC reads averaged per RSSI measurement |
-| `TUNE_SETTLE_MS` | `src/rx5808.h` | `30` | ms to wait for RX5808 PLL after tuning |
-| `NODE_ID` | `src/main.cpp` | `"RX01"` | Change per device for multi-node dedup |
-| `ENABLE_MESH_RELAY` | `src/main.cpp` | `1` | Set `0` to disable Heltec UART relay |
-| `MIN_DWELL_HITS` | `src/main.cpp` | `2` | Both reads must clear threshold to confirm a hit |
-| `REPORT_INTERVAL_MS` | `src/main.cpp` | `5000` | Rate-limit re-reports of the same channel (ms) |
-
-### Detection Output
-
-Each hit produces a JSON line on USB Serial (consumed by `mesh-mapper.py`):
+`mesh-mapper.py` accepts these JSON lines from a Level 1 station, whether they arrive
+over USB or via the home node from the mesh. **Keep this table and the
+`level1-station` README in step.**
 
 ```json
 {
@@ -709,59 +623,52 @@ Each hit produces a JSON line on USB Serial (consumed by `mesh-mapper.py`):
 }
 ```
 
-The synthetic MAC (`AF:00:…`) encodes frequency + band + channel so that
-`mesh-mapper.py` tracks each FPV channel as a distinct "device" — no two
-channels share the same identifier.
+| Key | Required | Mapper use |
+|-----|----------|------------|
+| `type` | yes, must be `"analog_fm"` | Routes the line around every Remote ID code path: no FAA lookup (`_skip_faa`), no drone/pilot markers, not appended to `detection_history`, 30 s stale timeout in `cleanup_old_detections()`, `ANALOGFM-` sensor marker + range-ring CoT events |
+| `mac` | yes | Tracking key. Synthetic, locally-administered `AF:00:` prefix + frequency (big-endian MHz) + band ASCII + channel, so every channel is its own "device" and never collides with a real Wi-Fi MAC |
+| `node_id` | yes | Looks up the station position in `NODE_LOCATIONS` and draws the ring there. Must equal the paired Meshtastic node's shortName/longName |
+| `freq_mhz`, `band`, `ch` | yes | Popup, log line, CoT callsign |
+| `rssi_raw` | yes | Range estimate (`_rssi_to_max_range_m`, free-space path loss at 5.8 GHz) and ring colour (green ≥ 1000, amber ≥ 800, red below, RX5808 ADC counts) |
+| `rssi` | yes (duplicate of `rssi_raw`) | Generic RSSI display shared with Level 2 detections |
+| `basic_id` | yes | Human-readable label in the detection list |
 
-If `ENABLE_MESH_RELAY` is on, a compact human-readable message is also sent to
-the Heltec relay:
-```
-AnalogFM: R1 5658MHz rssi=850 [RX01]
-```
+Planned additive keys for the RX3364 (`receiver`, `rssi_dbm`) and the mapper edits
+they need are specified in the `level1-station` branch under
+`docs/RX3364-INTEGRATION-PLAN.md`; a detection without them must keep working
+unchanged.
 
-### Integration with mesh-mapper.py
+Status lines carrying `heartbeat`, `status` or `info` and none of the detection keys
+are dropped by the serial reader and never create a device.
 
-Connect the XIAO via USB, select the port in the mapper UI, and analog FM
-detections will begin flowing immediately.
+### What appears in the UI
 
-**What appears in the UI:**
-
-| Without node position | With node position |
+| Without station position | With station position |
 |---|---|
 | Detection listed in no-GPS panel | Dashed-circle range ring on the map |
-| Band, channel, frequency, RSSI shown | 📡 marker at the node's GPS location |
+| Band, channel, frequency, RSSI shown | 📡 marker at the station's GPS location |
 | No map marker | Ring radius = FSPL-derived max detection range |
 
-To get the range ring, give mesh-mapper a position for the node. Two options:
+To get the range ring, give the mapper a position for the station. Two options:
 
 **Option A — Meshtastic HTTP API (automatic, updates every 30 s):**
 Open the mapper Settings panel and enter the Heltec node's URL:
 ```
 POST /api/meshtastic_url  { "node_id": "RX01", "url": "http://192.168.1.x" }
 ```
-The node's `shortName` or `longName` in Meshtastic must match `NODE_ID` in the firmware (e.g. `"RX01"`). The poller will pick up the correct node even in a multi-node mesh.
+The node's `shortName` or `longName` in Meshtastic must match the station's `node_id`
+(e.g. `"RX01"`). The poller picks up the correct node even in a multi-node mesh.
 
 **Option B — manual coordinates:**
 ```
 POST /api/node_location  { "node_id": "RX01", "lat": 25.7617, "lon": -80.1918 }
 ```
 
-Differences from RemoteID detections:
+Differences from Level 2 (Remote ID) detections:
 - `type: "analog_fm"` is logged at INFO level with band/channel/RSSI.
 - Range rings are colored by signal strength: green ≥ 1000, amber ≥ 800, red below (within the RX5808's ~0–1320 ADC-count range).
-- Each detection is also forwarded to ATAK/WinTAK as two CoT events: a `a-u-G-E-S` sensor marker and a `u-r-b-c-c` range ring shape.
-
-### Channel Map
-
-All 40 channels scanned per cycle:
-
-| Band | CH1 | CH2 | CH3 | CH4 | CH5 | CH6 | CH7 | CH8 |
-|------|-----|-----|-----|-----|-----|-----|-----|-----|
-| **R (Raceband)** | 5658 | 5695 | 5732 | 5769 | 5806 | 5843 | 5880 | 5917 |
-| **A** | 5865 | 5845 | 5825 | 5805 | 5785 | 5765 | 5745 | 5725 |
-| **B** | 5733 | 5752 | 5771 | 5790 | 5809 | 5828 | 5847 | 5866 |
-| **E** | 5705 | 5685 | 5665 | 5645 | 5885 | 5905 | 5925 | 5945 |
-| **F (Fatshark)** | 5740 | 5760 | 5780 | 5800 | 5820 | 5840 | 5860 | 5880 |
+- Each detection is also forwarded to ATAK/WinTAK as two CoT events: an `a-u-G-E-S` sensor marker and a `u-r-b-c-c` range ring shape.
+- A station silent for 30 s is marked inactive (Level 2 detections get 3 min).
 
 ---
 
@@ -807,11 +714,11 @@ All 40 channels scanned per cycle:
 | `GET` | `/download/cumulative_detections.csv` | Download full history (CSV) |
 | `GET` | `/download/cumulative.kml` | Download full history (KML) |
 
-### **RX5808 / TAK Integration**
+### **Level 1 station / TAK Integration**
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `GET/POST` | `/api/node_location` | Get or set manual GPS for an RX5808 node |
+| `GET/POST` | `/api/node_location` | Get or set manual GPS for a Level 1 station |
 | `GET/POST` | `/api/meshtastic_url` | Get or set Meshtastic HTTP API URL for a node |
 | `GET` | `/api/tak_contacts` | Current inbound ATAK/WinTAK/iTAK operator positions |
 
@@ -857,7 +764,7 @@ Real-time events pushed to connected clients:
   `WIFI_CHAN_START`/`WIFI_CHAN_COUNT` exclude a channel in the scan list. Fix the
   defines and rebuild. See [Regulatory domain](#regulatory-domain).
 
-**Detections reach the mapper but the RX5808 range ring is missing or misplaced**
+**Detections reach the mapper but a Level 1 range ring is missing or misplaced**
 - The Meshtastic node's shortName/longName must equal the firmware `NODE_ID`; otherwise
   the mapper falls back to the first GPS node in the mesh. Or set coordinates by hand via
   `/api/node_location`.

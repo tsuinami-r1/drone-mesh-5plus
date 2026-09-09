@@ -4,7 +4,7 @@
 # PlatformIO build output and downloaded lib dependencies.
 # Covers every firmware project (.pio/build, .pio/libdeps, ...); the previous
 # "*.pio/build/" pattern missed libdeps and the projects without their own
-# .gitignore (remoteid-c5-5g, rx5808-detection).
+# .gitignore (remoteid-c5-5g).
 .pio/
 
 *.vscode/
