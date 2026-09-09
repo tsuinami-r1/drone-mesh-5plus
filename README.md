@@ -94,7 +94,7 @@ branches and meet only at the collection point, where both feed the same
 
 | Tier | What it listens for | Hardware | Branch |
 |------|---------------------|----------|--------|
-| **Level 1** | Analog FPV **video carriers**: 5.8 GHz today (RX5808), 3.3 GHz planned (RX3364). No decoding, calibrated signal strength only. One station draws a range ring; several produce a position fix. | XIAO ESP32-S3 or C5 + analog receiver module + Heltec V3 | [`level1-station`](https://github.com/tsuinami-r1/drone-mesh-5plus/tree/level1-station) |
+| **Level 1** | Analog FPV **video carriers**: 5.8 GHz today (RX5808), 3.3 GHz planned (RX3364). Calibrated signal strength per sector, a bearing from four sector antennas, and a video-sync check. One station draws a ring and a bearing; several produce a position fix. | XIAO ESP32-S3 or C5 + RX5808 + SP4T switch + 4 patches + sync separator + Heltec V3 | [`level1-station`](https://github.com/tsuinami-r1/drone-mesh-5plus/tree/level1-station) |
 | **Level 2** | Digital **Remote ID / DJI DroneID / MAVLink** over Wi-Fi and BLE. Decodes drone and pilot GPS. | XIAO ESP32-S3 or C5 + Heltec V3 | **`main`** (this branch) |
 | Collection point | `mesh-mapper.py`, the home node bridge, TAK output, Raspberry Pi installer | Laptop / Raspberry Pi + XIAO S3 `home_node` + Heltec V3 | **`main`** (this branch) |
 
@@ -248,7 +248,7 @@ The remaining projects (`remoteid-mesh`, `remoteid-mesh-dualcore`, the
 `node-mode-dualcore` `remote_node` env) are older S3-only detection builds that are
 kept working; see [Firmware variants](#-firmware-variants). Level 1 (analog FPV)
 station firmware is not on this branch: check out `level1-station` and open its
-`rx5808-detection/` folder instead.
+`level1-analog-fpv/` folder instead.
 
 The first time a project opens, pioarduino downloads the platform, toolchains and
 libraries (several hundred MB). Let it finish before building.
@@ -460,9 +460,9 @@ behind those labels differ per board and are selected at compile time.
 | Firmware | Board | XIAO TX → Heltec RX | XIAO RX ← Heltec TX |
 |----------|-------|---------------------|---------------------|
 | `remoteid-c5-5g` | ESP32-S3 | D4 (GPIO5) | D5 (GPIO6) |
-| `remoteid-c5-5g` | ESP32-C5 | D4 (GPIO6) | D5 (GPIO7) |
-| Level 1 `rx5808-detection` (branch `level1-station`) | ESP32-S3 | D4 (GPIO5) | D5 (GPIO6) |
-| Level 1 `rx5808-detection` (branch `level1-station`) | ESP32-C5 | D4 (GPIO6) | D5 (GPIO7) |
+| `remoteid-c5-5g` | ESP32-C5 | D4 (**GPIO6 — disputed, see below**) | D5 (**GPIO7 — disputed**) |
+| Level 1 `level1-analog-fpv` (branch `level1-station`) | ESP32-S3 | D4 (GPIO5) | D5 (GPIO6) |
+| Level 1 `level1-analog-fpv` (branch `level1-station`) | ESP32-C5 | D4 (GPIO23) | D5 (GPIO24) |
 | `node-mode-dualcore` (remote and home) | ESP32-S3 | D4 (GPIO5) | D5 (GPIO6) |
 | `remoteid-mesh-dualcore` | ESP32-S3 | D4 (GPIO5) | D5 (GPIO6) |
 | `remoteid-mesh` (legacy) | ESP32-S3 | D5 (GPIO6) | D8 (GPIO7) |
@@ -473,6 +473,22 @@ Plus **GND ↔ GND**. On the Heltec side use whichever free GPIOs you configured
 `remoteid-c5-5g` build prints its `UART: TX=GPIOx, RX=GPIOy → Heltec` line at boot;
 for the others the `SERIAL1_TX_PIN` / `SERIAL1_RX_PIN` constants near the top of the
 project's `main.cpp` are the authority.
+
+> ⚠️ **Unresolved: the XIAO ESP32-C5 D4/D5 GPIO numbers.** `remoteid-c5-5g`
+> hardcodes GPIO6/GPIO7 for the C5, but the Arduino core's `XIAO_ESP32C5` variant
+> (`pins_arduino.h`, platform 55.03.39 — the one this project builds against) maps
+> **D4 = GPIO23, D5 = GPIO24**, with GPIO6 as the battery-sense pin and GPIO7 as D3.
+> The variant also puts `SDA`/`SCL` on GPIO23/24, matching the XIAO family
+> convention that D4/D5 are the I2C pins, as they are on the S3. If the variant is
+> right, a fielded C5 running `remoteid-c5-5g` is driving the wrong header pin and
+> its **mesh relay is silent** — it would still report normally over USB. The Level 1
+> firmware takes its pins from the variant, so the two disagree today.
+>
+> **Check before trusting a C5 node's mesh path:** confirm that a C5 station's
+> detections reach the mapper *through the home node*, not only over USB. Then
+> settle it with a continuity test from the XIAO's D4 pad and correct whichever
+> side is wrong. The S3 is unaffected: GPIO5/GPIO6 are D4/D5 in the S3 variant, so
+> every S3 node and the carrier PCB itself are correct either way.
 
 ### Meshtastic node naming
 
@@ -600,7 +616,9 @@ revisit intervals.
 
 Level 1 stations detect **analog FPV video carriers** (5.645–5.945 GHz today via the
 RX5808; 3.3 GHz via the RX3364 is planned) and report calibrated received power per
-channel. They carry no drone or pilot GPS, so a single station gets a **range ring**
+channel, a **bearing** from four sector antennas behind an RF switch, and a
+**video-sync check** that separates a real analog video carrier from Wi-Fi or noise
+and fingerprints it as PAL or NTSC. They carry no drone or pilot GPS, so a single station gets a **range ring**
 rather than a drone marker — but **two or more stations hearing the same emitter
 produce a position fix**, because the unknown transmitter power cancels out in the
 differences between them (see [Multi-station fixes](#multi-station-fixes-differential-rssi-multilateration)).
@@ -610,7 +628,7 @@ Their firmware, wiring, calibration and roadmap live on the
 branch:
 
 - [**Build and flash a station**](https://github.com/tsuinami-r1/drone-mesh-5plus/blob/level1-station/README.md#-quick-start) — quick start, wiring, calibration
-- [**Station v2 hardware**](https://github.com/tsuinami-r1/drone-mesh-5plus/blob/level1-station/docs/LEVEL1-V2-HARDWARE.md) — sector direction finding and video fingerprinting, with a [printable bench guide](https://github.com/tsuinami-r1/drone-mesh-5plus/blob/level1-station/docs/Level1-Station-v2-Bench-Guide.pdf)
+- [**Station hardware**](https://github.com/tsuinami-r1/drone-mesh-5plus/blob/level1-station/docs/LEVEL1-V2-HARDWARE.md) — parts, pin and power budget for the sector-DF station, with a [printable bench guide](https://github.com/tsuinami-r1/drone-mesh-5plus/blob/level1-station/docs/Level1-Station-v2-Bench-Guide.pdf)
 
 This section documents only the mapper side of the interface.
 
@@ -658,6 +676,14 @@ over USB or via the home node from the mesh. **Keep this table and the
 | `receiver` | no (defaults to `rx5808`) | Log tag, popup, `basic_id` prefix (`5.8G` / `3.3G`) |
 | `rssi_dbm` | no, but needed for fixes | Calibrated received power. Ring radius (`_max_range_m`, FSPL at `freq_mhz`, assumed `DEFAULT_TX_DBM`), ring colour (green ≥ −60, amber ≥ −75, red below) and the multi-station solver. The mapper attaches `rssi_dbm` + `dbm_source` (`firmware`/`mapper`) to every analog detection it emits |
 | `rssi_mv`, `rssi_n`, `seq` | no | Popup / diagnostics |
+
+**Emitted by the station, not yet consumed here.** Level 1 v2 firmware also sends
+`hw`, `sectors`, `sector`, `bearing_deg`, `bearing_sigma_deg`, `freq_peak`,
+`video`, `sync_hz`, `field_hz`, `sync_q` and `fp`. `update_detection()` stores and
+re-emits them untouched, so they reach the UI and the API but change nothing.
+Teaching `_analog_solve()` to use `bearing_deg`/`bearing_sigma_deg` as a residual
+term — two bearings intersect with no transmitter-power assumption at all — and
+`fp` as a clustering key alongside frequency is the next change here.
 | `rssi_min`, `rssi_max` | no | Sample spread; the solver down-weights noisy reports |
 
 The compact **mesh relay** copy of this line carries only `type`, `mac`,
