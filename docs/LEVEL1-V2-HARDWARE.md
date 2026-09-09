@@ -1,8 +1,10 @@
 # Level 1 station v2 — sector direction finding + video fingerprint
 
-Status: **design**. This is the build spec for the next Level 1 station. It keeps
-the RX5808, the XIAO and the Heltec exactly as fielded today and adds two things
-that do not exist in v1:
+Status: **firmware implemented, hardware not yet bench validated.** This is the
+build spec for the Level 1 station. The firmware in `level1-analog-fpv/` implements
+it and builds for both boards; the bench procedure in the
+[bench guide](Level1-Station-v2-Bench-Guide.pdf) is what turns it into a fielded
+unit. It keeps the RX5808, the XIAO and the Heltec and adds two things:
 
 1. **Four sector patch antennas behind an SP4T RF switch.** Every channel visit
    reads RSSI on all four sectors. The ratio between the strongest sector and its
@@ -79,27 +81,36 @@ electronics alone. The v1 station was ≈ $45 without power.
 
 ## 2. Pin budget
 
-Every XIAO D-pin is used. The v1 assignments are untouched so a v1 carrier PCB
-still fits a v1 firmware.
+Every XIAO D-pin is used. The firmware takes GPIO numbers from the Arduino core's
+XIAO variant (`pins_arduino.h`) through `config.h`, so the same source builds for
+both boards.
 
-| XIAO pin | S3 GPIO | C5 GPIO | v1 use | v2 use |
-|----------|---------|---------|--------|--------|
-| D0 | 1 | 2 | RSSI (ADC) | RSSI (ADC) |
-| D1 | 2 | 3 | — | switch select V1 |
-| D2 | 3 | 4 | — | switch select V2 |
-| D3 | 4 | 5 | — | switch select V3 (unused if the switch decodes 2 lines) |
-| D4 | 5 | 6 | Heltec RX (UART TX) | same |
-| D5 | 6 | 7 | Heltec TX (UART RX) | same |
-| D6 | 43 | *verify* | — | CSYNC → PCNT pulse counter |
-| D7 | 44 | *verify* | — | VSYNC → GPIO interrupt |
-| D8 | 7 | 8 | RX5808 CLK | same |
-| D9 | 8 | 9 | RX5808 CS | same |
-| D10 | 9 | 10 | RX5808 DATA | same |
+| XIAO pin | S3 GPIO | C5 GPIO | Use |
+|----------|---------|---------|-----|
+| D0 | 1 | 1 | RSSI (ADC) |
+| D1 | 2 | 0 | switch select V1 |
+| D2 | 3 | 25 | switch select V2 |
+| D3 | 4 | 7 | switch select V3 (unused if the switch decodes 2 lines) |
+| D4 | 5 | 23 | Heltec RX (UART TX) |
+| D5 | 6 | 24 | Heltec TX (UART RX) |
+| D6 | 43 | 11 | CSYNC → GPIO interrupt (edge count) |
+| D7 | 44 | 12 | VSYNC → GPIO interrupt (edge count) |
+| D8 | 7 | 8 | RX5808 CLK |
+| D9 | 8 | 9 | RX5808 CS |
+| D10 | 9 | 10 | RX5808 DATA |
 
-On the S3, D6/D7 are the UART0 pins; they are free because the console is USB-CDC.
-Confirm the C5's D6/D7 GPIO numbers against the board silkscreen/pinout before
-cutting a carrier. Both chips have a PCNT peripheral, which measures the 15.7 kHz
-sync train with no CPU load.
+On both chips D6/D7 are the UART0 default pins; they are free because the console
+is USB-CDC.
+
+> ⚠️ **C5 pin map.** Earlier firmware on this branch hard-coded D0 = GPIO2,
+> D4 = GPIO6, D5 = GPIO7 for the C5, which disagrees with the variant above. The
+> variant is the one trusted here (its D6/D7 match the C5's UART0 defaults exactly
+> as the S3's do). Confirm with a continuity test on the first C5 board and record
+> the result in the bench guide.
+
+The sync train is counted with GPIO interrupts rather than the PCNT peripheral:
+15.7 kHz for 200 ms on a hit is negligible load, and the same code runs unchanged
+on both chips.
 
 ## 3. Power budget
 
@@ -118,18 +129,22 @@ receivers would have doubled it, which is why the switch was chosen.
 
 ## 4. How the firmware uses it
 
-Per channel visit (same 30 ms PLL settle as today):
+Implemented in `level1-analog-fpv/src/` (`main.cpp`, `sector_switch.*`,
+`bearing.*`, `video_sync.*`). Per channel visit (same 30 ms PLL settle as before):
 
 ```
-tune(channel); delay(TUNE_SETTLE_MS)
+tune(channel); delay(RX_TUNE_SETTLE_MS)
 for sector in N, E, S, W:
-    select(sector); delayMicroseconds(200)      # switch + RSSI filter settle
-    stats[sector] = read_rssi_stats()           # RSSI_SAMPLES raw + mV
-hit       = max(stats).mean_raw >= RSSI_THRESHOLD
+    select(sector); delayMicroseconds(SECTOR_SETTLE_US)   # switch + RSSI filter settle
+    stats[sector] = read_rssi_stats()                     # RSSI_SAMPLES raw + mV
+best = argmax(stats.mean_mv)
+confirm best with MIN_DWELL_HITS reads, all >= RSSI_THRESHOLD
 sector_dbm = [mv_to_dbm(s.mean_mv) for s in stats]
 ```
 
-Sweep time: 40 × (30 + 4 × ~2 ms) ≈ 1.9 s, unchanged in practice.
+Sweep time: 40 × (30 + 4 × ~3 + ~5 ms) ≈ 1.9 s. After the sweep the
+`VIDEO_MAX_PER_SWEEP` strongest due peaks each get a fine-tune (11 steps ≈ 0.36 s)
+and a 200 ms sync count.
 
 **Bearing** (amplitude comparison): take the strongest sector `k` and its two
 neighbours. With sector powers in dB, `bearing = az[k] + K · (P[k+1] − P[k−1])`,
@@ -147,8 +162,13 @@ edges with PCNT for 100 ms and time VSYNC edges for 200 ms.
 | 15 625 ± 30 Hz | 50 Hz | `PAL` |
 | no stable train | — | `none` (carrier without video: report with `video:"none"`, mapper may de-prioritise) |
 
-`sync_q` (0–100) is the fraction of 10 ms windows whose count was within ±2 of
-the expected, i.e. a signal-quality number that does not depend on the RSSI
+The standard is decided by the **field** rate. The line rate only has to fall
+inside 14.5–17 kHz, because an LM1881's composite sync includes equalising and
+serration pulses during vertical blanking that lift the edge count ~500 Hz above
+nominal; an LMH1980 HSYNC output would sit at the nominal figures.
+
+`sync_q` (0–100) is the fraction of 10 ms slices whose count was within ±3 of
+the median slice, i.e. a signal-quality number that does not depend on the RSSI
 curve at all.
 
 **Fingerprint** `fp` = `<video>/<line_hz>/<freq_peak>`, e.g. `NTSC/15736/5742`,
@@ -157,22 +177,29 @@ around the hit and taking the RSSI peak. Camera crystals and VTX offsets are
 stable per aircraft over a flight, so two stations reporting the same `fp`
 are looking at the same drone even if their peak channels differ.
 
-### JSON additions (additive, mapper change on `main` first)
+### JSON additions (additive; emitted now, consumed by the mapper next)
 
 ```json
+"hw": "v2",
 "sectors": [-62.1, -68.4, -84.0, -79.2],
+"sector": 0,
 "bearing_deg": 41,
 "bearing_sigma_deg": 14,
+"freq_peak": 5742,
 "video": "NTSC",
 "sync_hz": 15736,
+"field_hz": 60,
 "sync_q": 96,
 "fp": "NTSC/15736/5742"
 ```
 
-The mesh line carries `bearing_deg`, `bearing_sigma_deg`, `video`, `fp` (about
-55 more bytes; still under 190 with `rssi_min`/`rssi_max` dropped from the mesh
-copy if needed). The mapper adds a bearing residual term to `_analog_solve()`
-and uses `fp` as a secondary clustering key alongside frequency.
+The mesh line carries `bearing_deg`, `bearing_sigma_deg` and `fp` (or
+`"video":"none"`), with `rssi_raw`/`rssi_min`/`rssi_max` dropped from the mesh
+copy and a 16-bit `seq`, for a worst case of 191 bytes against the 200-byte
+limit; the firmware drops the fingerprint, then the bearing, rather than ever
+truncating JSON. The mapper on `main` ignores these keys safely today; the next
+`main` change adds a bearing residual term to `_analog_solve()` and uses `fp` as
+a secondary clustering key alongside frequency.
 
 ## 5. Build sequence
 
@@ -197,7 +224,9 @@ and uses `fp` as a secondary clustering key alongside frequency.
 - **Which SP4T.** The SKY13322-375LF and PE42442 are both rated past 6 GHz with
   3.3 V logic, but their control line count and truth tables differ; the pin budget
   reserves three lines so either fits. Confirm current stock before the PCB.
-- **C5 D6/D7 GPIO numbers.** Not in this repo yet; read them off the board.
+- **C5 pin map.** Resolved from the Arduino variant (see §2) but it contradicts
+  the numbers the earlier firmware used for D0/D4/D5; a continuity test on the
+  first board settles it.
 - **Patch polarisation.** Linear (safe default) vs RHCP (+3 dB on the common case).
   Decide per deployment; do not mix within one station.
 - **Elevation.** Patches tilted 10–15° up cover drones at 30–150 m out to a few

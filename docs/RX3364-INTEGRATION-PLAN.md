@@ -97,26 +97,27 @@ range and curve, settle time, logic level, current, all written into §9.
 
 ## 4. Target architecture: one Level 1 firmware, pluggable receivers
 
-Today `rx5808-detection/src/main.cpp` is the whole station: scan loop, detection
-JSON, heartbeat, mesh relay. The receiver-specific part is only
-`rx5808.h/.cpp` (pins, channel table, tune, read RSSI). The RX3364 slots in behind
-the same seam rather than forking `main.cpp`.
+**Done (M1).** `level1-analog-fpv/src/main.cpp` is receiver-agnostic and refers only
+to the `RX_*` names; the RX5808 driver sits behind `analog_receiver.h` in
+`receivers/`. The RX3364 slots in behind the same seam rather than forking `main.cpp`.
 
-### 4.1 Directory layout (after the refactor)
+### 4.1 Directory layout (as it exists on this branch)
 
 ```
-level1-analog-fpv/               <- renamed from rx5808-detection/
-  platformio.ini                 <- 4 envs: rx5808_s3, rx5808_c5, rx3364_s3, rx3364_c5
+level1-analog-fpv/
+  platformio.ini                 <- envs: seeed_xiao_esp32s3, seeed_xiao_esp32c5 (-DRECEIVER_RX5808)
+                                    RX3364 adds rx3364_s3 / rx3364_c5 with -DRECEIVER_RX3364
   src/
-    main.cpp                     <- scan loop, JSON, heartbeat, relay (receiver-agnostic)
+    config.h                     <- every pin and tuneable (pins via the XIAO variant D0..D10)
+    main.cpp                     <- sweep × sectors, peak-pick, fine-tune + video, JSON, relay (receiver-agnostic)
     analog_receiver.h            <- the interface every receiver implements
+    sector_switch.* bearing.* video_sync.*   <- v2 station modules, receiver-independent
     receivers/
-      rx5808.h / rx5808.cpp      <- today's driver, unchanged behaviour
+      rx5808.h / rx5808.cpp      <- today's driver
       rx3364.h / rx3364.cpp      <- new
 ```
 
-The rename is done with `git mv` so `git log --follow` keeps the RX5808 history.
-`firmware/` gains `rx3364-s3.bin` / `rx3364-c5.bin`.
+`firmware/` gains `level1-v2-rx3364-s3.bin` / `-c5.bin`.
 
 ### 4.2 Receiver interface
 
@@ -144,19 +145,17 @@ struct AnalogChannel {
 //   #define RX_CHANNEL_COUNT   40       | 16              (#define: sizes stack arrays,
 //                                                          static_assert'd against the table)
 //   #define RX_TUNE_SETTLE_MS  30       | <Gate 0>
-//   #define RX_RSSI_THRESHOLD  600      | <Gate 0>
 //   extern const AnalogChannel RX_CHANNELS[];
 //   void  rx_init();
 //   void  rx_tune(uint16_t freq_mhz);
-//   int   rx_read_rssi_raw();            // averaged 12-bit ADC counts
-//   float rx_rssi_raw_to_dbm(int raw);   // per-receiver calibration from Gate 0
+//   void  rx_read_rssi_stats(RssiStats*);  // RSSI_SAMPLES reads, raw + calibrated mV
+//   float rx_mv_to_dbm(int mv);            // per-receiver calibration from Gate 0
+//   float rx_raw_to_dbm(int raw);
 ```
 
-`main.cpp` then refers only to `RX_*` names. The RX5808 driver becomes a thin
-rename of the current code (`rx5808_init` → `rx_init`, `FPV_CHANNEL_COUNT` →
-`RX_CHANNEL_COUNT`, `FPV_CHANNELS` → `RX_CHANNELS`); its behaviour and its
-prebuilt-binary output must be byte-for-byte equivalent in emitted JSON, which is
-the regression check for the refactor.
+This is the interface as implemented in `analog_receiver.h`. The threshold and the
+calibration line live in `config.h`, not the driver; an RX3364 build overrides
+them there. The RSSI pin stays on D0 for both receivers.
 
 ### 4.3 Pin budget
 
@@ -273,8 +272,8 @@ change can merge before any RX3364 station exists.
 | # | Milestone | Deliverable | Acceptance |
 |---|-----------|-------------|------------|
 | M0 | Gate 0 bench characterisation | §9 filled in, photos of the module in `docs/rx3364/` | Every unknown in §2 resolved |
-| M1 | Refactor onto `AnalogReceiver` | `level1-analog-fpv/` layout, `rx5808_s3`/`rx5808_c5` envs, `receiver` + `rssi_dbm` keys added | Emitted JSON identical to today apart from the two new keys; both boards build |
-| M2 | Mapper contract on `main` | §5.2 edits, `py_compile` clean, `mapper_test` extended with an `analog_fm` + `rssi_dbm` sample | RX5808 station with and without new keys renders the same ring; a synthetic 3320 MHz detection draws a ring ~1.7× the 5800 MHz one at equal dBm |
+| M1 ✅ | Refactor onto `AnalogReceiver` | `level1-analog-fpv/` layout, `receiver` + `rssi_dbm` keys | Done with the v2 station restructure; both boards build |
+| M2 ✅ | Mapper contract on `main` | `receiver` / `rssi_dbm` accepted, frequency-derived FSPL, `analog_fusion_test.py` | Done on `main` (differential-RSSI fusion commit) |
 | M3 | RX3364 driver | `receivers/rx3364.*`, `rx3364_s3`/`rx3364_c5` envs, prebuilt bins, README wiring table | Bench VTX on A1 reports `3.3G-A1-3320MHz` with the expected RSSI; VTX off reports nothing for 5 min |
 | M4 | Field validation | One RX3364 station on the mesh next to an RX5808 station | Both rings appear at the right node position with distinct `basic_id`s; solar node survives 72 h |
 | M5 (stretch) | Dual-receiver station | Second driver instance on D1/D2/D3 + second ADC pin | Sweep both bands from one XIAO |
