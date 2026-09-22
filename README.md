@@ -2,10 +2,10 @@
 
 <div align="center">
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![ESP32](https://img.shields.io/badge/ESP32-S3%20%7C%20C5-green.svg)](https://www.espressif.com/)
+[![License: MIT + GPL-3.0](https://img.shields.io/badge/License-MIT%20%2B%20GPL--3.0-yellow.svg)](#-license)
+[![ESP32](https://img.shields.io/badge/ESP32-C5%20(v3)%20%7C%20S3%20%2B%20C5%20(v2)-green.svg)](https://www.espressif.com/)
 [![PlatformIO](https://img.shields.io/badge/PlatformIO-pioarduino-orange.svg)](https://github.com/pioarduino/platform-espressif32)
-[![Branch](https://img.shields.io/badge/branch-level1--station-blue.svg)](https://github.com/tsuinami-r1/drone-mesh-5plus/tree/level1-station)
+[![Branch](https://img.shields.io/badge/branch-level1--c5phy-blue.svg)](https://github.com/tsuinami-r1/drone-mesh-5plus/tree/level1-c5phy)
 
 **Analog FPV video detection stations for the drone-mesh-5plus counter-surveillance network.**
 
@@ -14,7 +14,11 @@ for analog FPV video transmitters, reports **how strong, from which bearing, and
 whether it is really video** over a Meshtastic mesh, and lets the mapper place
 the drone from what several stations heard.
 
-[⚡ Quick Start](#-quick-start) • [🧭 Hardware](#-hardware) • [🔧 Calibration](#-calibration) • [⚙️ Configuration](#️-configuration-reference) • [🔌 Mapper contract](#-mapper-contract) • [🗺️ Roadmap](#️-roadmap) • [🤝 Contributing](#-contributing)
+**This branch carries the v3 prototype: the XIAO ESP32-C5's own 5 GHz Wi-Fi radio
+is the receiver.** No RX5808, no sync separator. The v2 station (RX5808 + sync
+separator) it replaces stays on this branch unchanged as the reference design.
+
+[⚡ Quick Start](#-quick-start) • [🧭 Hardware](#-hardware) • [🧪 Bench validation](#-bench-validation-the-gate-before-fielding) • [🔧 Calibration](#-calibration) • [⚙️ Configuration](#️-configuration-reference) • [🔌 Mapper contract](#-mapper-contract) • [🤝 Contributing](#-contributing)
 
 </div>
 
@@ -26,19 +30,15 @@ Every two seconds or so the station sweeps all 40 standard 5.8 GHz FPV channels.
 At each channel an RF switch presents the four sector patch antennas in turn, so a
 hit carries a calibrated received power on every sector. From the strongest
 sector and its two neighbours the station computes a **bearing**. The strongest
-hits are then fine-tuned to their carrier centre and held while a sync separator
-on the receiver's video output counts line and field pulses, which says whether
-the carrier is **really analog video**, PAL or NTSC, and yields a **fingerprint**
-that stays with one drone across channels and stations.
+hits are then held while the carrier is demodulated and checked for a
+horizontal-sync train at the PAL or NTSC line period, which says whether the
+carrier is **really analog video** and yields a **fingerprint** that stays with
+one drone across channels and stations.
 
 | Stations hearing the drone | What the mapper can draw |
 |---|---|
 | **One** | A range ring ("no further than this") and a **bearing line** from the station |
 | **Two or more** | A 🎯 **position fix** with a 90 % confidence circle. Bearings intersect with no assumption about transmitter power; received-power differences and every alive-but-silent station narrow it further |
-
-A single station's signal strength alone was never enough: it cannot tell a
-25 mW whoop nearby from a 4 W long-range VTX far away. Bearings and multi-station
-fusion are what turn Level 1 from "something is out there" into a position.
 
 **Park stations densely.** Fix accuracy is a fraction of the spacing between
 stations, so six cheap boxes beat two clever ones.
@@ -50,38 +50,94 @@ stations, so six cheap boxes beat two clever ones.
 
 | Tier | Listens for | Branch |
 |------|-------------|--------|
-| **Level 1** *(this branch)* | Analog FPV **video carriers** — 5.8 GHz now, 3.3 GHz planned. Signal strength per sector, bearing, video fingerprint. | **`level1-station`** |
-| **Level 2** | Digital **Remote ID / DJI DroneID / MAVLink** over Wi-Fi and BLE. Decodes drone and pilot GPS. | [`main`](https://github.com/tsuinami-r1/drone-mesh-5plus) |
+| **Level 1 v3 prototype** *(this branch)* | Analog FPV **video carriers**, 5.8 GHz, on the **C5's own radio**. Power per sector, bearing, software video check | **`level1-c5phy`** |
+| Level 1 v2 | Same job on an **RX5808 + sync separator**; XIAO S3 or C5 | [`level1-station`](https://github.com/tsuinami-r1/drone-mesh-5plus/tree/level1-station) (also kept here in `level1-analog-fpv/`) |
+| Level 2 | Digital **Remote ID / DJI DroneID / MAVLink** over Wi-Fi and BLE. Decodes drone and pilot GPS | [`main`](https://github.com/tsuinami-r1/drone-mesh-5plus) |
 | Collection point | `mesh-mapper.py`, the home node bridge, TAK output, Raspberry Pi installer | [`main`](https://github.com/tsuinami-r1/drone-mesh-5plus) |
 
-Both tiers share the same Heltec/Meshtastic backhaul and the same D4/D5 UART
-wiring. They meet only at the mapper, through the [JSON line contract](#-mapper-contract).
+All tiers share the same Heltec/Meshtastic backhaul and the same **D4/D5** UART
+wiring. They meet only at the mapper, through the [JSON line contract](#-mapper-contract),
+which the v3 station speaks unchanged.
+
+---
+
+## 🆕 **v3 in one table: what the C5 replaces**
+
+| v2 station part | Job | v3 replacement | How |
+|---|---|---|---|
+| **RX5808** synthesizer | Tune to each FPV channel | The C5's Wi-Fi PHY | Park the PHY on the nearest public 5 GHz Wi-Fi centre, then retune it to the exact FPV frequency (`phy_set_freq`) |
+| **RX5808** RSSI pin + ADC | Received power | Raw I/Q from the PHY | The modem's diagnostic bus (MODEM_DIAG) is routed out through eight GPIO-matrix lanes and read back by the PARLIO peripheral at 40 MS/s. Power at a fixed, known receive gain becomes dBm |
+| **RX5808** video out + **LM1881 / LMH1980** | Is it really video? PAL or NTSC? | Software | The same I/Q is FM-demodulated (phase step between samples) and searched for sync-tip pulses of the right width repeating at 64.0 µs (PAL) or 63.6 µs (NTSC) |
+| RX5808 ±10 MHz fine-tune sweep | Carrier centre for the fingerprint | Measured carrier offset | The mean phase step of the coherent samples gives the offset from the tuned frequency to ~50 kHz |
+| — | Wi-Fi rejection | FM coherence | A carrier counts only if ≥ 40 % of samples are FM-coherent (phase step within ±45°). Wi-Fi/OFDM and thermal noise fail this even when strong |
+
+What stays: the four sector patches, the SP4T switch, the bearing estimator, the
+Heltec on D4/D5, the mapper contract, the solar power design.
+
+> ⚠️ **Status: compiles, links, and is untested on hardware.** The PHY register
+> sequence, lane map and metrics are the [C5VRX](https://github.com/colonelpanichacks/c5vrx)
+> project's hardware findings on ESP-IDF 6.0; this firmware re-implements them on
+> the Arduino/pioarduino (ESP-IDF 5.5) framework the rest of the fleet uses. Read
+> [Bench validation](#-bench-validation-the-gate-before-fielding) before
+> building more than one.
 
 ---
 
 ## 🧭 **Hardware**
 
-One station is:
+One v3 station is:
 
 | Block | Part | Notes |
 |---|---|---|
 | Antennas | **4 × 5.8 GHz patch, 8 dBi, ~70° beam**, on the four faces of the box | One batch, matched; linear or RHCP |
-| RF switch | **SP4T, 0.1–6 GHz, 3.3 V control** — SKY13322-375LF or PE42442 | Common port replaces the RX5808 whip |
-| Receiver | **RX5808** 5.8 GHz analog FM, SPI-modded | Unchanged from earlier stations |
-| Video check | **LMH1980** sync separator (3.3 V) on the RX5808 video pin | LM1881 works on a breadboard with a divider |
-| MCU | **Seeed XIAO ESP32-S3** or **XIAO ESP32-C5** | Firmware picks the pinout at compile time |
+| RF switch | **SP4T, 0.1–6 GHz, 3.3 V control** — SKY13322-375LF or PE42442 | Common port → the XIAO's **U.FL** antenna connector |
+| Receiver + MCU | **Seeed XIAO ESP32-C5** | The receiver **is** the C5. Ships with a U.FL antenna pigtail; use the SP4T instead |
 | Mesh | **Heltec WiFi LoRa 32 V3** running Meshtastic | Node name = `NODE_ID` |
-| Power | 20 W panel, MPPT charger with 5 V out, 4 × 18650 (≈ 50 Wh) | Station load ≈ 1.3 W |
+| Power | 20 W panel, MPPT charger with 5 V out, 4 × 18650 (≈ 50 Wh) | Station load ≈ 1.0 W (the PHY replaces the 0.6 W RX5808 with ~0.4 W of radio) |
 
-Two documents carry the full design:
+Gone from the v2 BOM: RX5808, sync separator, video coupling parts, the RX5808
+SPI wiring. The full design is in
+📄 [**`docs/LEVEL1-V3-C5PHY-HARDWARE.md`**](docs/LEVEL1-V3-C5PHY-HARDWARE.md)
+(parts, pin budget, how the receiver works, power budget, open questions). The v2
+design stays documented in [`docs/LEVEL1-V2-HARDWARE.md`](docs/LEVEL1-V2-HARDWARE.md).
 
-- 📄 [**`docs/LEVEL1-V2-HARDWARE.md`**](docs/LEVEL1-V2-HARDWARE.md) — parts list, pin budget, power budget, block diagram, open questions
-- 🖨️ [**`docs/Level1-Station-v2-Bench-Guide.pdf`**](docs/Level1-Station-v2-Bench-Guide.pdf) — printable six-page A4 bench guide: wiring list, BOM with tick boxes, a five-stage procedure with blanks for the values you measure
+### Pins
 
-> ⚠️ **Not yet bench validated.** The firmware compiles and the design is costed,
-> but no v2 board has been built. Three values must be measured before a board is
-> cut: the RSSI millivolt-to-dBm calibration points, the **SP4T control truth
-> table**, and the **XIAO ESP32-C5 pin map** (see the note under wiring).
+Use the **D-pin labels silkscreened on the XIAO**. The mesh UART is on **D4/D5**
+exactly as on every other station tier, so the same carrier header fits.
+
+| XIAO pin | C5 GPIO | v3 use | v2 used it for |
+|---|---|---|---|
+| **D0** | 1 | **I/Q lane — leave unconnected** | RX5808 RSSI |
+| **D1** | 0 | **I/Q lane — leave unconnected** | switch V1 |
+| **D2** | 25 | SP4T control **V1** | switch V2 |
+| **D3** | 7 | **I/Q lane — leave unconnected** | switch V3 |
+| **D4** | 23 | Heltec RX (UART TX) | same |
+| **D5** | 24 | Heltec TX (UART RX) | same |
+| **D6** | 11 | free (UART0 console TX) | CSYNC |
+| **D7** | 12 | free (UART0 console RX) | VSYNC |
+| **D8** | 8 | SP4T control **V2** | RX5808 CLK |
+| **D9** | 9 | SP4T control **V3** (spare if the switch decodes 2 lines) | RX5808 CS |
+| **D10** | 10 | **I/Q lane — leave unconnected** | RX5808 DATA |
+| back pads GPIO2/3/4/5 | | **I/Q lanes — leave unconnected** | — |
+| 3V3 | | switch VDD | |
+| 5V | | from the charger's 5 V rail (also feeds the Heltec) | |
+| GND | | everything, one star point | |
+
+The **I/Q lanes** carry the PHY's raw sample bits out of the chip through the
+GPIO matrix and straight back into the PARLIO peripheral. Nothing may be wired to
+those pads: no pull resistors, no test points that load them. The set (GPIO
+1, 0, 2, 7, 10, 5, 3, 4) is the one C5VRX proved on hardware; it is configurable
+in `config.h` as GPIO numbers, not D-labels.
+
+RF: each patch → switch RF1–RF4 through **equal-length coax ≤ 15 cm**; switch
+common → the XIAO's **U.FL** connector. There is no video wiring.
+
+> **The C5 D4/D5 = GPIO23/24 question is closed.** C5VRX's bench notes measured
+> their resistor DAC on the XIAO's D4–D9 pads as GPIO 23, 24, 11, 12, 8, 9 — the
+> Arduino variant's numbers, which this firmware and the v2 firmware use. The
+> `remoteid-c5-5g` Level 2 firmware on `main` still hardcodes GPIO6/GPIO7 and
+> needs the fix described in its README.
 
 ---
 
@@ -89,10 +145,10 @@ Two documents carry the full design:
 
 ### What you need
 
-The [bench guide](docs/Level1-Station-v2-Bench-Guide.pdf) has the complete bill
-of materials with tick boxes. In short: the parts in the table above, a computer
-with VS Code and a USB-C cable, and the [`main`](https://github.com/tsuinami-r1/drone-mesh-5plus)
-branch running `mesh-mapper.py` at the collection point.
+The parts in the table above, a computer with VS Code and a USB-C cable, a
+**5.8 GHz analog VTX you can key on demand** (nothing can be validated without one),
+and the [`main`](https://github.com/tsuinami-r1/drone-mesh-5plus) branch running
+`mesh-mapper.py` at the collection point.
 
 <br>
 
@@ -103,53 +159,27 @@ Follow [Step 1 on `main`](https://github.com/tsuinami-r1/drone-mesh-5plus/blob/m
 for the extension, udev rules and the CLI alternative, then:
 
 ```bash
-git clone --branch level1-station https://github.com/tsuinami-r1/drone-mesh-5plus.git level1-station
+git clone --branch level1-c5phy https://github.com/tsuinami-r1/drone-mesh-5plus.git level1-c5phy
 ```
 
-In VS Code use **File → Open Folder…** on `level1-analog-fpv/` — the project
-folder, **not** the repository root, or PlatformIO will not find the environments.
+In VS Code use **File → Open Folder…** on `level1-c5phy/` — the project folder,
+**not** the repository root, or PlatformIO will not find the environment.
 
 <br>
 
 ### 2 · Wire it
 
-Use the **D-pin labels silkscreened on the XIAO**. The firmware takes GPIO numbers
-from the board's own Arduino variant, so the same source builds for both boards.
-
-| XIAO pin | S3 GPIO | C5 GPIO | Connects to |
-|---|---|---|---|
-| **D0** | 1 | 1 | RX5808 RSSI (analog) |
-| **D1** | 2 | 0 | SP4T control V1 |
-| **D2** | 3 | 25 | SP4T control V2 |
-| **D3** | 4 | 7 | SP4T control V3 (spare if the switch decodes 2 lines) |
-| **D4** | 5 | 23 | Heltec RX (UART TX) |
-| **D5** | 6 | 24 | Heltec TX (UART RX) |
-| **D6** | 43 | 11 | Sync separator CSYNC |
-| **D7** | 44 | 12 | Sync separator VSYNC |
-| **D8** | 7 | 8 | RX5808 CLK |
-| **D9** | 8 | 9 | RX5808 CS (active LOW) |
-| **D10** | 9 | 10 | RX5808 DATA |
-| 3V3 | | | RX5808 VCC, switch VDD, sync separator VDD |
-| 5V | | | From the charger's 5 V rail (also feeds the Heltec) |
-| GND | | | Everything, one star point |
-
-RF: each patch → switch RF1–RF4 through **equal-length coax ≤ 15 cm**; switch
-common → RX5808 antenna pad. Video: RX5808 VIDEO → 0.1 µF → sync separator input,
-75 Ω terminated. The full picture is sheet 2 of the [bench guide](docs/Level1-Station-v2-Bench-Guide.pdf).
-
-> ⚠️ **ESP32-C5 pin map.** The C5 column above is what the Arduino core's
-> `XIAO_ESP32C5` variant defines, and it is what the firmware uses. Earlier
-> firmware on this branch assumed D0 = GPIO2, D4 = GPIO6 and D5 = GPIO7, which
-> disagrees. The variant's D6/D7 are the C5's UART0 defaults, exactly as the S3's
-> are, so the variant is the one trusted here — but confirm with a continuity
-> test on the first C5 board.
+Follow the [pin table](#pins). For the first bench board you need only the XIAO,
+a USB cable and one patch (or the stock antenna) on the U.FL: the switch lines
+can float, the firmware still scans through "sector 0". Add the SP4T and the
+other three patches once the receiver itself is proven.
 
 <br>
 
 ### 3 · Configure the station
 
-Everything lives in `level1-analog-fpv/src/config.h`. Three things must be set
-per station before flashing:
+Everything lives in `level1-c5phy/src/config.h`. Three things must be set per
+station before flashing:
 
 ```cpp
 #define NODE_ID              "RX01"   // unique; must equal the Meshtastic node name (≤ 6 chars keeps mesh lines short)
@@ -157,30 +187,80 @@ per station before flashing:
 #define SECTOR_SWITCH_TABLE  { {0,0,0}, {1,0,0}, {0,1,0}, {1,1,0} }   // V1,V2,V3 per sector: FROM THE SWITCH DATASHEET
 ```
 
-A wrong `NODE_ID` draws this station's output at another station's position. A
-wrong heading rotates every bearing it reports. A wrong switch table swaps
-sectors and points bearings at the wrong quadrant.
+and one that is new in v3 and only matters if the heartbeat reports `tune_fail`:
 
-<br>
-
-### 4 · Flash
-
-```bash
-cd level1-analog-fpv
-pio run -e seeed_xiao_esp32s3 --target upload     # XIAO ESP32-S3
-pio run -e seeed_xiao_esp32c5 --target upload     # XIAO ESP32-C5
+```cpp
+#define RF_COUNTRY_CC        ""       // "" = driver default ("01"); try "US"/"HK"/... if channels are refused
 ```
 
+<br>
+
+### 4 · Flash — **full erase first**
+
+```bash
+cd level1-c5phy
+pio run -e seeed_xiao_esp32c5 --target erase      # mandatory before the first flash and after any PHY trouble
+pio run -e seeed_xiao_esp32c5 --target upload
+```
+
+The erase clears the Wi-Fi PHY's stored calibration data. C5VRX found that stale
+calibration state from a previous firmware leaves the receive chain mistuned or
+deaf; every one of their flashing guides starts with `erase_flash`. Do the same.
+
 > **ESP32-C5 will not connect?** Hold **BOOT**, tap **RESET**, release **BOOT**,
-> then immediately re-run. The S3 does not need this.
+> then immediately re-run.
 >
-> **No toolchain?** [`firmware/`](firmware/README.md) holds prebuilt binaries with
-> the default configuration — `RX01`, heading 0, binary switch table — for bench
-> testing only.
+> **No toolchain?** [`firmware/`](firmware/README.md) holds a prebuilt merged
+> image with the default configuration — `RX01`, heading 0, binary switch table,
+> unmeasured calibration — for bench testing only.
 
 <br>
 
-### 5 · Wire the Heltec and name the node
+### 5 · Verify the receiver on the bench
+
+```bash
+pio device monitor --baud 115200
+```
+
+Within a few seconds:
+
+```json
+{"info":"c5phy v3 station ready","node_id":"RX01","receiver":"c5phy","hw":"v3","channels":40,"sectors":4,"heading":0,"threshold_dbm":-87.0,"threshold_level_db":8.0,"q_min":40,"peak_pick":1,"video":1,"bw40":1,"gain_max":62,"window_us":409,"rf":true}
+```
+
+`"rf":true` means the Wi-Fi PHY came up receive-only and the PARLIO reader is
+running. `"rf":false` is followed by an `{"info":"error",...}` line naming the
+step that failed; the station then keeps heartbeating with `"scanning":false`.
+
+Then use the **bench console** (type into the monitor, Enter-terminated):
+
+| Command | Does |
+|---|---|
+| `?` | help + status: tuned frequency, Wi-Fi bootstrap channel, gain, capture and error counts, `tune_fail` |
+| `h R3` or `h 5732` | hold that channel and print one metrics line every 200 ms |
+| `s 0`…`s 3` | select a sector while holding |
+| `g 30` / `g a` | fixed receive gain index / back to automatic |
+| `v` | run the video check on the held channel and print every window |
+| `x` | resume scanning |
+
+With **no VTX on**, `h A1` should stream lines like
+
+```json
+{"info":"bench","freq_mhz":5865,"sector":0,"gain":62,"level_db":0.3,"rssi_dbm":-94.7,"q_phase":7,"p_mean":2.1,"p_med":2,"clip":0,"origin":700,"cfo_khz":-812,"mod":0,"noise":0,"phy_rssi":-97,"nf_dbm":-98}
+```
+
+— power near the noise reference (`p_mean` ≈ 2, `level_db` ≈ 0) and single-digit
+coherence. **Key a VTX on A1** and the same line should jump: `level_db` up by
+tens of dB, `gain` stepping down from 62 as the 4-bit I/Q starts clipping,
+`q_phase` above 50, `mod` = 1. Then `v` should print windows with
+`"video":1,"std":"NTSC"` (or PAL) and a `line_hz` near 15734 (or 15625).
+
+Only when both halves of that work is the receiver alive; carry on to the
+[bench validation](#-bench-validation-the-gate-before-fielding) list.
+
+<br>
+
+### 6 · Wire the Heltec and name the node
 
 Three wires: XIAO **D4** → Heltec RX, XIAO **D5** ← Heltec TX, GND ↔ GND. Set the
 Heltec's Meshtastic serial module to `TEXTMSG` at 115200 and **name the node after
@@ -194,31 +274,9 @@ Full Meshtastic setup is [Step 5 on `main`](https://github.com/tsuinami-r1/drone
 
 <br>
 
-### 6 · Verify
-
-```bash
-pio device monitor --baud 115200
-```
-
-Within a few seconds:
-
-```json
-{"info":"rx5808 v2 station ready","node_id":"RX01","receiver":"rx5808","hw":"v2","channels":40,"sectors":4,"heading":0,"threshold":600,"peak_pick":1,"video":1,"fine_tune":1}
-```
-
-then a heartbeat every minute. Power a VTX nearby and a detection line should
-name its channel, four sector powers, a bearing, and `"video":"NTSC"` or `"PAL"`.
-Nothing after 5 s? The XIAO waits up to 3 s for a USB host — replug and reopen
-the monitor.
-
-<br>
-
 ### 7 · Calibrate, then put it on the map
 
-Do the three [calibrations](#-calibration): threshold (two minutes, required to
-work at all), dBm curve (required before this station joins others), and the
-bearing pattern (required for bearings to mean anything).
-
+Do the three [calibrations](#-calibration): threshold, dBm and bearing pattern.
 Then start `mesh-mapper.py` from `main` and give the station a position, since it
 has no GPS of its own:
 
@@ -233,105 +291,137 @@ curl -X POST http://localhost:5000/api/node_location \
 ```
 
 Detections arrive over the mesh via the home node. For bench testing, plug the
-XIAO into the mapper host over USB and pick its port in the Settings panel.
+XIAO into the mapper host over USB and pick its port in the Settings panel: the
+mapper needs **no change** for a v3 station (it already labels `receiver:"c5phy"`
+as 5.8 GHz by frequency and prefers `rssi_dbm` over the raw count).
+
+---
+
+## 🧪 **Bench validation — the gate before fielding**
+
+Everything below is a real unknown, in the order it blocks the rest. Record the
+numbers in `docs/LEVEL1-V3-C5PHY-HARDWARE.md` §7 as you go.
+
+1. **Does the PHY come up receive-only and stream I/Q?** Boot line `"rf":true`,
+   `?` shows `captures` climbing and `cap_err` at 0. If `rf_start` fails, the
+   error names the ESP-IDF call; if captures fail, the PARLIO/lane path is the
+   suspect (see Troubleshooting).
+2. **Which channels tune?** After one sweep the heartbeat's `tune_fail` must be
+   0. Each FPV channel is reached from the nearest public 5 GHz centre (5660–5885 MHz)
+   that the regulatory table accepts. `tune_fail > 0` → set `RF_COUNTRY_CC`.
+3. **Does a VTX register on its channel and only there?** With a VTX on R3,
+   the sweep must report R3 (and possibly its ±20 MHz neighbours, which
+   `PEAK_PICK` folds into one). A hit on a channel 40 MHz away means the
+   coherence gate is not doing its job — check `q_phase` on that channel with `h`.
+4. **Video check on a real VTX, both standards.** `v` on a held channel with an
+   NTSC camera, then a PAL one. C5VRX proved NTSC recovery on hardware; **PAL is
+   unproven**. Expect `line_hz` 15734 ± 10 for NTSC and 15625 ± 10 for PAL.
+5. **Sensitivity and the dBm curve.** A VTX through a step attenuator (or at
+   known open-field distances), `level_db` versus attenuation. The slope should
+   be 1 dB/dB over ~60 dB; where the curve flattens at the bottom is the
+   station's floor. Compare with an RX5808 v2 station side by side: this number
+   decides whether v3 replaces v2 or only supplements it.
+6. **Sector switch through the U.FL.** The SP4T's insertion loss and the switch
+   truth table, as for v2, then the bearing sweep.
+
+Two behaviours to watch for that C5VRX documents on their IDF 6.0 build and this
+port could inherit: a periodic disturbance from the PHY's 1 Hz PLL tracking
+timer (the firmware deinitialises it; confirm captures stay quiet), and the need
+for a full flash erase whenever the receiver "goes deaf" after reflashing.
 
 ---
 
 ## 🔧 **Calibration**
 
-Three calibrations, each one-time per station. The [bench guide](docs/Level1-Station-v2-Bench-Guide.pdf)
-has blanks for every value.
+Three calibrations, each one-time per station.
 
 ### Threshold — required
 
 With no FPV transmitter powered nearby:
 
-1. Watch the serial monitor for 30 s. Any `rssi_raw` values that appear are the **noise floor**.
-2. Set `RSSI_THRESHOLD` to **noise floor + 200** and reflash.
-3. Power a known VTX and confirm only its channel and its immediate neighbours report.
+1. Hold any channel (`h A1`) and watch `level_db` for 30 s. It should sit near
+   0 ± 2 dB on a quiet channel. Note the highest value across a few channels.
+2. `DETECT_LEVEL_DB` (default 8 dB) must be well above that. Raise it if Wi-Fi
+   traffic on 5.8 GHz keeps a channel high; the coherence gate rejects Wi-Fi, but
+   not a constant-envelope signal.
+3. Power a known VTX and confirm only its channel and its immediate neighbours
+   report.
 
 ### dBm curve — required before a station joins a fleet
 
-`rssi_dbm` comes from the calibrated ADC millivolts through a two-point line whose
-**defaults are an unmeasured approximation.** Stations with different curves
-disagree about the same signal, and the position solver reads that as noise.
+`rssi_dbm` is `RSSI_CAL_DBM_AT_NOISE + level_db × RSSI_CAL_SLOPE + RSSI_CAL_OFFSET_DB`.
+The default (`-95`, `1.0`, `0`) is a physics estimate of the C5's noise floor in a
+20 MHz bandwidth, **not a measurement**. Stations with different curves disagree
+about the same signal, and the position solver reads that as noise.
 
-1. Put a VTX on a known channel through a step attenuator, or at two known open-field distances.
-2. Note `rssi_mv` at a weak and a strong level about 50 dB apart.
-3. Enter the two (mV, dBm) pairs as `RSSI_CAL_MV_LO`/`DBM_LO` and `RSSI_CAL_MV_HI`/`DBM_HI`.
-4. Use `RSSI_CAL_OFFSET_DB` for the station's antenna and cable gain, so the fleet agrees on one source.
-5. Reflash and check the heartbeat's `threshold_dbm` is sane (roughly −90 to −95).
-
-Raw ADC counts are **not** comparable between an S3 and a C5. `rssi_dbm` is what
-the mapper compares; `threshold_dbm` is what it uses to reason about a station that
-stays silent.
+1. Put a VTX on a known channel through a step attenuator at two known levels
+   about 50 dB apart (a power meter on the VTX output, or a calibrated v2 station).
+2. Hold the channel and note `level_db` at each.
+3. Solve the two-point line for `RSSI_CAL_DBM_AT_NOISE` and `RSSI_CAL_SLOPE`.
+4. Use `RSSI_CAL_OFFSET_DB` for this station's antenna and cable gain, so the
+   fleet agrees on one source.
+5. Reflash and check the heartbeat's `threshold_dbm` is sane (roughly −85 to −90
+   with the default 8 dB threshold).
 
 ### Bearing pattern — required for bearings
 
-The bearing is `az[strongest] + K × (P[right] − P[left])` in degrees, with `K` in
-degrees per dB from the measured patch pattern.
+Unchanged from v2: the bearing is `az[strongest] + K × (P[right] − P[left])` in
+degrees, `K` in degrees per dB from the measured patch pattern.
 
 1. Mount all four patches on the box, put a VTX at 30 m on a known bearing with clear line of sight.
 2. Rotate the box in 15° steps through a full turn and log the four `sectors` values at each step.
-3. Fit `K` from the neighbour difference and set `BEARING_DEG_PER_DB`; the default 3 °/dB suits an 8 dBi, 70° patch.
-4. Save the sweep to `docs/` as the station's pattern.
-5. At install, measure the true bearing of the N face and set `STATION_HEADING_DEG`.
+3. Fit `K` and set `BEARING_DEG_PER_DB`; the default 3 °/dB suits an 8 dBi, 70° patch.
+4. At install, measure the true bearing of the N face and set `STATION_HEADING_DEG`.
 
 ---
 
 ## ⚙️ **Configuration reference**
 
-All in `level1-analog-fpv/src/config.h`.
+All in `level1-c5phy/src/config.h`.
 
 **Station**
 
 | Constant | Default | What it does |
 |---|---|---|
-| `NODE_ID` | `"RX01"` | Unique per station; must equal the Meshtastic node name. Keep it ≤ 6 characters so the worst-case mesh line stays under 200 bytes |
+| `NODE_ID` | `"RX01"` | Unique per station; must equal the Meshtastic node name. Keep it ≤ 6 characters |
 | `STATION_HEADING_DEG` | `0` | True bearing of the N face; added to every reported bearing |
-| `STATION_HW` | `"v2"` | Reported as `hw` in every line |
+| `STATION_HW` / `RX_NAME` | `"v3"` / `"c5phy"` | Reported as `hw` / `receiver` in every line |
 
-**Receiver and threshold**
-
-| Constant | Default | What it does |
-|---|---|---|
-| `RSSI_THRESHOLD` | `600` | Raw ADC count a channel must clear (RX5808: ~0–1320) |
-| `RSSI_SAMPLES` | `10` | ADC reads per dwell read, raw and calibrated millivolts each |
-| `MIN_DWELL_HITS` | `2` | Dwell reads on the strongest sector that must all clear the threshold |
-| `RSSI_CAL_MV_LO/HI`, `RSSI_CAL_DBM_LO/HI` | `450/1100`, `−95/−20` | The mV → dBm line |
-| `RSSI_CAL_OFFSET_DB` | `0.0` | Per-station trim |
-
-**Sectors and bearing**
+**Receiver**
 
 | Constant | Default | What it does |
 |---|---|---|
-| `SECTOR_AZIMUTHS` | `{0, 90, 180, 270}` | Boresight of each patch relative to the N face |
-| `SECTOR_SWITCH_TABLE` | 2-bit binary, V3 unused | V1/V2/V3 levels per sector — **from the switch datasheet** |
-| `SECTOR_SETTLE_US` | `200` | Wait after a switch change before reading RSSI |
-| `BEARING_DEG_PER_DB` | `3.0` | Pattern slope; calibrate |
-| `BEARING_MAX_OFFSET_DEG` | `45` | Clamp on the offset inside a quadrant |
-| `BEARING_SIGMA_BASE_DEG` | `15` | Reported 1σ for a clean measurement; widened for weak peaks, noise-floor neighbours, or a rear sector nearly as strong (multipath) |
+| `IQ_WINDOW_BYTES` | `16384` | Samples per capture window: 409.6 µs = 6.4 video lines |
+| `RF_BW40` | `1` | Analog filter BW40 (proven) vs BW20 (+3 dB, unproven at boot) |
+| `RF_GAIN_MAX` / `RF_GAIN_MIN` / `RF_GAIN_STEP_DOWN` | `62` / `2` / `12` | Forced receive gain index range and the step taken while the I/Q clips |
+| `RF_CLIP_MAX_PERMILLE` | `30` | Clipped-sample share that triggers a gain step |
+| `RF_GAIN_DB_PER_STEP` / `RF_NOISE_POWER` | `1.0` / `2.0` | The level formula: `(62 − gain) × step + 10 log10(p_mean / noise)` |
+| `RF_TUNE_SETTLE_MS` / `RF_GAIN_SETTLE_MS` | `8` / `3` | Wait after a retune / a gain write |
+| `RF_COUNTRY_CC` | `""` | Regulatory domain; `""` keeps the driver default. Set if `tune_fail > 0` |
+| `SCAN_LOW_BAND` | `0` | Add L1–L8 (5362–5621 MHz); unproven, off |
+| `IQ_LANE_GPIOS` / `IQ_LANE_DIAG` | C5VRX set | The eight loopback GPIOs and the MODEM_DIAG bits on them |
 
-**Video and fingerprint**
-
-| Constant | Default | What it does |
-|---|---|---|
-| `VIDEO_ENABLE` | `1` | Count sync pulses on the strongest peaks |
-| `VIDEO_MEASURE_MS` / `VIDEO_SLICE_MS` | `200` / `10` | Measurement window and the slice size used for `sync_q` |
-| `VIDEO_MAX_PER_SWEEP` | `2` | Peaks that get fine-tune + video per sweep (bounds sweep time) |
-| `VIDEO_LINE_HZ_MIN/MAX` | `14500` / `17000` | Composite-sync rate that counts as "video-shaped" (wide enough for an LM1881's equalising pulses) |
-| `VIDEO_FIELD_TOL_HZ` | `3` | 50 ± 3 → PAL, 60 ± 3 → NTSC |
-| `FINE_TUNE_ENABLE`, `FINE_TUNE_SPAN_MHZ`, `FINE_TUNE_STEP_MHZ` | `1`, `10`, `2` | Locate the carrier centre for the fingerprint |
-
-**Reporting**
+**Detection**
 
 | Constant | Default | What it does |
 |---|---|---|
-| `ENABLE_MESH_RELAY` | `1` | `0` disables the Heltec UART relay |
-| `REPORT_INTERVAL_MS` / `MESH_REPORT_INTERVAL_MS` | `5000` / `10000` | Minimum ms between re-reports of one channel on USB / mesh |
-| `HEARTBEAT_INTERVAL_MS` / `MESH_HEARTBEAT_INTERVAL_MS` | `60000` / `120000` | Heartbeat cadence |
-| `PEAK_PICK` / `PEAK_WINDOW_MHZ` | `1` / `20` | Report only the strongest channel of each cluster of adjacent hits |
-| `MESH_LINE_MAX` | `200` | Hard limit on a mesh line; optional fields are dropped from the tail rather than truncating JSON |
+| `WINDOWS_PER_SECTOR` / `WINDOWS_PER_SECTOR_QUICK` | `3` / `1` | Windows per sector; level = minimum (bursts rejected), coherence = median |
+| `QUICK_DWELL_MISSES` / `QUICK_DWELL_RECHECK_SWEEPS` | `3` / `4` | A channel silent for 3 sweeps gets the quick count, re-checked every 4th sweep |
+| `DETECT_LEVEL_DB` | `8.0` | Level above the noise reference a hit needs |
+| `DETECT_Q_PHASE_MIN` | `40` | % of FM-coherent samples a hit needs |
+| `RSSI_CAL_DBM_AT_NOISE` / `RSSI_CAL_SLOPE` / `RSSI_CAL_OFFSET_DB` | `−95` / `1.0` / `0.0` | The level → dBm line |
+
+**Sectors, bearing, video, reporting**
+
+| Constant | Default | What it does |
+|---|---|---|
+| `SECTOR_AZIMUTHS`, `SECTOR_SWITCH_TABLE`, `SECTOR_SETTLE_US` | as v2 | Patch boresights, switch truth table, settle |
+| `BEARING_*` | as v2 | Pattern slope, clamp, sigma |
+| `VIDEO_WINDOWS` / `VIDEO_WINDOW_GAP_MS` | `8` / `5` | Windows demodulated per peak and their spacing |
+| `VIDEO_MIN_QUALITY` / `VIDEO_MIN_WINDOWS` | `70` / `3` | A window counts with sync score ≥ 70; the carrier is video when ≥ 3 windows count |
+| `VIDEO_MAX_PER_SWEEP` | `2` | Peaks that get a video check per sweep |
+| `ENABLE_MESH_RELAY`, `*_INTERVAL_MS`, `PEAK_PICK`, `PEAK_WINDOW_MHZ`, `MESH_LINE_MAX` | as v2 | Reporting cadence and limits |
+| `BENCH_CONSOLE` | `1` | The USB bench console; `0` removes it |
 
 <details>
 <summary><b>Firmware layout</b></summary>
@@ -339,20 +429,33 @@ All in `level1-analog-fpv/src/config.h`.
 <br>
 
 ```
-level1-analog-fpv/
-  platformio.ini            two envs; -DRECEIVER_RX5808 selects the driver
+level1-c5phy/
+  platformio.ini            one env: seeed_xiao_esp32c5 (pinned platform, see below)
+  LICENSE                   GPL-3.0-only (derived from C5VRX)
   src/
     config.h                every pin and tuneable
-    main.cpp                sweep, peak-pick, fine-tune + video on the strongest peaks, JSON, relay, heartbeat
-    analog_receiver.h       the RX_* interface a receiver driver implements
-    receivers/rx5808.*      RTC6715 tuning, RSSI raw + calibrated mV, dBm line
-    sector_switch.*         SP4T control lines and sector azimuths
-    bearing.*               amplitude-comparison bearing + sigma
-    video_sync.*            CSYNC/VSYNC edge counting, PAL/NTSC/none, quality
+    main.cpp                sweep (every channel × every sector), peak-pick, video check on the
+                            strongest peaks, JSON, relay, heartbeat, bench console
+    c5phy_rf.*              Wi-Fi PHY as a receive-only front end: init, TX queues off, retune,
+                            MODEM_DIAG lane routing, fixed gain, BW40
+    iq_capture.*            PARLIO RX one-shot capture of a 16 KiB I/Q window
+    demod.*                 power / FM-coherence metrics; software FM demod + H-sync search
+    sector_switch.*         SP4T control lines and sector azimuths (from v2)
+    bearing.*               amplitude-comparison bearing + sigma (from v2)
 ```
 
-Per sweep: every channel × every sector (≈ 1.8 s), then the strongest due peaks
-get a ±10 MHz fine-tune (≈ 0.36 s) and a 200 ms sync count each.
+Per channel visit: retune (~10 ms), then per sector 1–3 windows of 0.4 ms each
+plus ~2 ms of metrics, with a gain step and re-capture while the I/Q clips.
+A full 40-channel sweep is about 2 s; each due peak then gets 8 windows over
+~100 ms for the video check.
+
+**Toolchain pin.** `platformio.ini` pins pioarduino 55.03.39 because
+`c5phy_rf.cpp` links undocumented PHY symbols (`phy_set_freq`,
+`phy_force_rx_gain`, `phy_disable_agc`, `phy_rfagc_disable`, `phy_wifi_fbw_sel`,
+`phy_get_rssi`, `phy_get_noise_floor` from `libphy.a`; `phy_track_pll_deinit`
+from `libesp_phy.a`; `lmac_stop_hw_txq` from `libpp.a`). They are strong
+references on purpose: a platform bump that drops one fails at link time
+instead of shipping a receiver that cannot tune.
 
 </details>
 
@@ -369,7 +472,10 @@ get a ±10 MHz fine-tune (≈ 0.36 s) and a 200 ms sync count each.
 | **E** | 5705 | 5685 | 5665 | 5645 | 5885 | 5905 | 5925 | 5945 |
 | **F (Fatshark)** | 5740 | 5760 | 5780 | 5800 | 5820 | 5840 | 5860 | 5880 |
 
-Raceband R7 and Band F8 are both 5880 MHz — the same physical frequency.
+Raceband R7 and Band F8 are both 5880 MHz. Band A sits exactly on Wi-Fi
+channels 149–173 and needs no undocumented retune at all; every other channel is
+reached from the nearest of those centres (or 5660–5720 MHz for the low E and R
+channels). `SCAN_LOW_BAND` adds L1–L8.
 
 </details>
 
@@ -378,38 +484,37 @@ Raceband R7 and Band F8 are both 5880 MHz — the same physical frequency.
 ## 🔌 **Mapper contract**
 
 The interface between the branches: `mesh-mapper.py` on `main` consumes exactly
-these lines, over USB or through the home node from the mesh.
+these lines, over USB or through the home node from the mesh. **A v3 station
+emits the v2 contract**, with `receiver:"c5phy"`, `hw:"v3"` and a few extra
+diagnostic keys that the mapper stores and ignores.
 
 > ⚠️ **Rule for contributors:** a change to any emitted key lands together with
 > the matching `mesh-mapper.py` change on `main`, and the commit message names
 > the `main` commit. Stations in the field are not reflashed when the mapper
 > updates, so the mapper keeps accepting older keys.
->
-> **Status:** the mapper on `main` consumes everything through `seq` below and
-> ignores the v2 keys (`sectors` … `fp`) safely. Teaching the solver to use
-> bearings and the fingerprint is the next `main` change — see [Roadmap](#️-roadmap).
 
 ### Detection line (USB)
-
-Emitted whenever a channel clears the threshold, is the strongest of its cluster
-of adjacent channels, and `REPORT_INTERVAL_MS` has elapsed:
 
 ```json
 {
   "type":     "analog_fm",
-  "receiver": "rx5808",
-  "hw":       "v2",
+  "receiver": "c5phy",
+  "hw":       "v3",
   "mac":      "AF:00:16:6C:52:03",
   "freq_mhz": 5732,
   "band":     "R",
   "ch":       3,
   "rssi_raw": 903,
   "rssi":     903,
-  "rssi_mv":  683,
   "rssi_dbm": -68.1,
-  "rssi_min": 880,
-  "rssi_max": 930,
-  "rssi_n":   20,
+  "rssi_min": 890,
+  "rssi_max": 915,
+  "rssi_n":   3,
+  "level_db": 26.9,
+  "gain":     50,
+  "q_phase":  71,
+  "cfo_khz":  1840,
+  "carrier":  "fm",
   "sectors":  [-68.1, -74.4, -91.0, -85.2],
   "sector":   0,
   "bearing_deg": 32,
@@ -418,7 +523,9 @@ of adjacent channels, and `REPORT_INTERVAL_MS` has elapsed:
   "video":    "NTSC",
   "sync_hz":  15736,
   "field_hz": 60,
-  "sync_q":   95,
+  "sync_q":   88,
+  "sync_score": 91,
+  "video_windows": 8,
   "fp":       "NTSC/15736/5734",
   "basic_id": "5.8G-R3-5732MHz",
   "node_id":  "RX01",
@@ -426,71 +533,68 @@ of adjacent channels, and `REPORT_INTERVAL_MS` has elapsed:
 }
 ```
 
-| Key | Present | What the mapper does with it |
-|-----|---------|------------------------------|
-| `type` | **always**, literal `"analog_fm"` | Routes the line around every Remote ID path: no FAA lookup, no drone/pilot markers, 30 s stale timeout, sensor + range-ring CoT events |
-| `mac` | **always** | Tracking key: `AF:00:` + frequency (big-endian MHz) + band ASCII + channel |
-| `node_id` | **always** | Finds the station position; must equal the Meshtastic node name |
-| `freq_mhz`, `band`, `ch` | **always** | Popup, log, CoT callsign, frequency-derived path loss, emitter clustering within 20 MHz |
-| `rssi_raw`, `rssi` | USB | Raw ADC count; mapper fallback only |
-| `rssi_dbm` | **always** | Calibrated power on the strongest sector. Ring radius, ring colour (green ≥ −60, amber ≥ −75), and the multi-station solver |
-| `rssi_mv`, `rssi_min`, `rssi_max`, `rssi_n` | USB | Calibration reading and sample spread |
-| `receiver`, `hw` | USB | Driver and hardware revision |
-| `sectors`, `sector` | USB | dBm on each of the four sectors, and which was strongest |
-| `bearing_deg`, `bearing_sigma_deg` | **always** | Bearing from true north and its 1σ. *Mapper: next change* |
-| `freq_peak` | when measured | Carrier centre from the fine-tune sweep |
-| `video`, `sync_hz`, `field_hz`, `sync_q` | when measured | `NTSC`, `PAL` or `none`; measured line and field rates; quality 0–100 |
-| `fp` | when video present | `<standard>/<line_hz>/<freq_peak>` — the per-drone fingerprint. *Mapper: next change* |
-| `basic_id` | USB *(backfilled)* | Human-readable label |
-| `seq` | **always** | 16-bit report counter, for spotting mesh loss |
+| Key | Present | What it means on v3 |
+|-----|---------|---------------------|
+| `type`, `mac`, `node_id`, `freq_mhz`, `band`, `ch`, `basic_id`, `seq` | as v2 | Unchanged |
+| `rssi_dbm` | **always** | Calibrated power on the strongest sector, from the level formula. Ring radius, ring colour and the multi-station solver |
+| `rssi_raw`, `rssi`, `rssi_min`, `rssi_max` | USB | **Synthesised**: `rssi_dbm` pushed back through the mapper's own RX5808 curve, so a mapper without `rssi_dbm` support still draws the right ring. Min/max are the spread across the windows; `rssi_n` is the window count |
+| `level_db`, `gain` | USB, new | dB above the noise reference, and the gain index it was measured at |
+| `q_phase`, `cfo_khz`, `carrier` | USB, new | % FM-coherent samples; carrier offset from the tuned frequency; `fm` (modulated, constant envelope), `cw` (unmodulated) or `noise` |
+| `sectors`, `sector`, `bearing_deg`, `bearing_sigma_deg` | as v2 | dBm per sector, strongest, bearing and 1σ |
+| `freq_peak` | when measured | Tuned frequency + `cfo_khz`, rounded to MHz |
+| `video`, `sync_hz`, `sync_q` | when measured | `NTSC`, `PAL` or `none`; line rate from the measured line period; % of windows with a sync train |
+| `field_hz` | when measured | **Nominal** for the detected standard (50/60). v3 does not measure the field rate; v2 does |
+| `sync_score`, `video_windows` | USB, new | Mean sync score of the windows that counted; windows demodulated |
+| `fp` | when video present | `<standard>/<sync_hz>/<freq_peak>` — the per-drone fingerprint |
 
 ### Detection line (mesh relay)
 
-The same hit goes to the Heltec as one compact JSON line, `\n`-terminated with no
-CR, at most every `MESH_REPORT_INTERVAL_MS`:
+Byte-for-byte the v2 format, at most every `MESH_REPORT_INTERVAL_MS`:
 
 ```json
 {"type":"analog_fm","mac":"AF:00:16:6C:52:03","freq_mhz":5732,"band":"R","ch":3,"rssi_dbm":-68.1,"bearing_deg":32,"bearing_sigma_deg":15,"fp":"NTSC/15736/5734","node_id":"RX01","seq":42}
 ```
 
-It **must be JSON** — the home node forwards JSON unchanged (Level 1 lines bypass
-its MAC dedup) and drops anything else — and it **must stay under 200 bytes**. The
-firmware guarantees that by dropping optional groups from the tail if needed:
-first the fingerprint, then the bearing. `"video":"none"` replaces `fp` when video
-was measured and absent. The mapper backfills `rssi`, `basic_id` and `receiver`.
-Worst case with a 4-character `NODE_ID` is 191 bytes; every extra character of
-`NODE_ID` costs one.
+It **must be JSON** and **must stay under 200 bytes**; the firmware drops the
+fingerprint, then the bearing, rather than ever truncating. The mapper backfills
+`rssi`, `basic_id` and `receiver` (as `rx5808`, a label only).
 
 ### Heartbeat and info lines
 
-Every 60 s on USB and every 120 s on the mesh, plus once at boot. The mapper drops
-them as non-detections **after** recording the station as alive with its
-`threshold_dbm` — an alive station that does not report an emitter tells the
-solver the emitter is not within its range.
+Every 60 s on USB and every 120 s on the mesh, plus once at boot:
 
 ```json
-{"heartbeat":true,"node_id":"RX01","receiver":"rx5808","hw":"v2","scanning":true,"channels":40,"sectors":4,"heading":0,"threshold":600,"threshold_dbm":-94.5,"video_seen":7,"temp_c":41.2,"uptime_s":3600,"seq":42}
+{"heartbeat":true,"node_id":"RX01","receiver":"c5phy","hw":"v3","scanning":true,"channels":40,"sectors":4,"heading":0,"threshold":1010,"threshold_dbm":-87.0,"video_seen":7,"gain_max":62,"bw40":1,"tune_fail":0,"cap_err":0,"sweeps":1830,"nf_dbm":-98,"temp_c":41.2,"uptime_s":3600,"seq":42}
 ```
 
-The mesh copy carries `node_id`, `receiver`, `hw`, `heading`, `threshold_dbm`,
+New on v3: `scanning` is false when the PHY failed to start; `tune_fail` counts
+channels the regulatory table refused; `cap_err` counts failed I/Q captures;
+`nf_dbm` is the PHY's own noise-floor estimate when it returns one. The mesh copy
+is the v2 subset: `node_id`, `receiver`, `hw`, `heading`, `threshold_dbm`,
 `video_seen`, `temp_c`, `uptime_s`, `seq`.
 
 ### What the mapper does with several stations
 
-When two or more positioned stations report the same emitter (clustered by
-frequency within 20 MHz) inside the fusion window, the mapper solves for the
-emitter position **and** its unknown transmitter power from the differences in
-`rssi_dbm`, adds the "not within range of here" constraint from every
-alive-but-silent station, and publishes a fix with a 90 % confidence circle.
+Unchanged: reports from two or more positioned stations within 20 MHz and the
+fusion window are solved for position and transmitter power, silent-but-alive
+stations constrain it, fixes go to ATAK/WinTAK. `GET /api/analog_fixes`,
+`GET /api/analog_nodes`, `GET/POST /api/analog_fusion` on `main`.
 
-| Endpoint on `main` | Gives you |
-|---|---|
-| `GET /api/analog_fixes` | Current fixes: position, error radius, quality, contributing stations, estimated TX power |
-| `GET /api/analog_nodes` | Every Level 1 station heard: alive, threshold, temperature, position |
-| `GET`/`POST` `/api/analog_fusion` | Read or tune the solver live |
+---
 
-Fixes go to ATAK/WinTAK as CoT. `mapper_test/analog_fusion_test.py` on `main`
-exercises the path offline.
+## 📦 **The v2 station on this branch**
+
+`level1-analog-fpv/` is the RX5808 + sync-separator station exactly as on
+[`level1-station`](https://github.com/tsuinami-r1/drone-mesh-5plus/tree/level1-station),
+which remains its README, and `docs/LEVEL1-V2-HARDWARE.md` and the bench guide PDF
+are its design. It builds for both boards from the same source:
+
+```bash
+cd level1-analog-fpv && pio run -e seeed_xiao_esp32s3 -e seeed_xiao_esp32c5
+```
+
+Until the v3 [bench validation](#-bench-validation-the-gate-before-fielding) is
+through, v2 is the design to field.
 
 ---
 
@@ -498,9 +602,11 @@ exercises the path offline.
 
 | Next | What it adds | Status |
 |---|---|---|
-| **Bench validation of v2** | Switch truth table, sync separator on a real VTX, RSSI and bearing calibration, C5 pin map | 📋 Procedure in the [bench guide](docs/Level1-Station-v2-Bench-Guide.pdf) |
-| **Mapper consumes v2 keys** (`main`) | Bearing residuals in the solver so two stations triangulate with no power assumption; `fp` as a second clustering key; bearing lines and video badges in the UI | 📋 Next `main` change |
-| **[RX3364 3.3 GHz receiver](docs/RX3364-INTEGRATION-PLAN.md)** | Long-range analog FPV has moved much traffic to 3.3 GHz. Drops in behind `analog_receiver.h` | 📋 Blocked on gate 0 bench characterisation |
+| **Bench validation of v3** | The six checks above, PAL included; sensitivity against an RX5808 | 📋 Blocks everything else on this branch |
+| **v3 carrier PCB** | XIAO C5 footprint, SP4T with four U.FL launches, UART header, nothing else | 📋 After validation |
+| **Mapper consumes v2/v3 keys** (`main`) | Bearing residuals in the solver; `fp` as a second clustering key | 📋 Next `main` change |
+| **Field rate on v3** | Timed captures across a field to measure `field_hz` instead of inferring it | 📋 Nice to have |
+| **[RX3364 3.3 GHz](docs/RX3364-INTEGRATION-PLAN.md)** | Long-range analog on 3.3 GHz — the C5's radio cannot reach it, so this stays a v2-style module | 📋 Blocked on gate 0 |
 
 ---
 
@@ -509,98 +615,72 @@ exercises the path offline.
 Start here, then read [`CLAUDE.md`](CLAUDE.md) — short, and it holds the rules
 that are easy to break by accident.
 
-**The three that matter most:**
+**The four that matter most:**
 
 1. **This branch is firmware only.** `mesh-mapper.py`, the Level 2 firmware and the home node live on `main` and are never copied here.
-2. **Both boards, every time.** Every change must build and behave on the **XIAO ESP32-S3 and the XIAO ESP32-C5**. Pins come from the board variant via `config.h`; never hard-code a GPIO number.
-3. **Changing an emitted JSON key changes the contract.** The matching `mesh-mapper.py` change lands on `main` in the same change set, and the commit message names the `main` commit.
+2. **v3 is C5-only; v2 builds for both boards, every time.** `level1-c5phy/` refuses any board but the XIAO ESP32-C5 by design. `level1-analog-fpv/` must keep building and behaving on the S3 and the C5.
+3. **The I/Q lanes and the PHY symbols are pinned.** Do not move the loopback GPIOs, the mesh UART off D4/D5, or the platform version without a bench check.
+4. **Changing an emitted JSON key changes the contract.** The matching `mesh-mapper.py` change lands on `main` in the same change set.
 
 **Before you commit:**
 
 ```bash
-cd level1-analog-fpv
-pio run -e seeed_xiao_esp32s3 -e seeed_xiao_esp32c5     # both must succeed, no warnings in src/
+cd level1-c5phy      && pio run -e seeed_xiao_esp32c5                            # no warnings in src/
+cd ../level1-analog-fpv && pio run -e seeed_xiao_esp32s3 -e seeed_xiao_esp32c5   # v2 untouched, both boards
 ```
-
-If the emitted JSON changed, rebuild the prebuilt binaries in `firmware/` from the
-default configuration and run `mapper_test/analog_fusion_test.py` on `main`.
-
-**Traps worth knowing about:**
-
-- The RX5808 synthesizer register B is a **split N/A field**, `((tf/32)<<7) | (tf%32)`. The flat `(freq-479)/2` form mistunes by about 4 GHz and detects nothing.
-- ADC attenuation is **per-pin** (`analogSetPinAttenuation`), not global.
-- Mesh lines are `\n`-terminated with **no CR**, written as one burst, and never longer than `MESH_LINE_MAX`. Meshtastic's TEXTMSG serial module broadcasts raw chunks.
-- `RX_CHANNEL_COUNT` and `SECTOR_COUNT` are `#define`s so they can size stack arrays; `static_assert`s keep them honest.
-- The video classifier decides PAL/NTSC by **field** rate. An LM1881's composite sync carries equalising pulses that lift the line-rate count ~500 Hz; do not tighten `VIDEO_LINE_HZ_MIN/MAX` to the nominal line rates.
 
 ---
 
 ## 🐛 **Troubleshooting**
 
 <details open>
-<summary><b>Every channel reports, or nothing ever reports</b></summary>
+<summary><b><code>"rf":false</code> at boot</b></summary>
 
-- Re-run the threshold calibration. The ADC range is 0–1320 counts, so a threshold above ~1300 can never trigger and one below the noise floor triggers on everything.
-- Confirm the RSSI line is on **D0**, and the receiver is actually tuning: with a known VTX on, only its channel and its immediate neighbours should report. If all 40 report identically, the SPI lines (D10/D8/D9) are miswired.
+- The `{"info":"error"}` line names the ESP-IDF call. `esp_wifi_set_bandwidths(BW40)` failing means the driver refused 40 MHz on 5 GHz — check the platform version; the firmware has no BW20 fallback on purpose.
+- `no 5 GHz channel accepted by regulatory table`: set `RF_COUNTRY_CC`.
+- `MAC TX queues still enabled`: a register layout change; this is IDF-pinned code.
 
 </details>
 
 <details>
-<summary><b>All four sectors read the same, or bearings point at the wrong quadrant</b></summary>
+<summary><b>Captures fail (<code>cap_err</code> climbing) or every channel reads the same</b></summary>
 
-- Same on all four: the switch is not switching. Check the control lines on D1/D2/D3 and `SECTOR_SWITCH_TABLE` against the datasheet; on a C5, check the pin map note under wiring.
-- Wrong quadrant: `SECTOR_SWITCH_TABLE` order does not match the physical patches, or `STATION_HEADING_DEG` is wrong. `sectors` in the USB line shows which index was strongest; walk a VTX around the box and check the index follows it.
+- Something is loading an I/Q lane pad (D0, D1, D3, D10 or the back pads). They must float.
+- `p_mean` stuck at 0 with `origin` = 1000: the lanes are not carrying the modem bus; the PARLIO input or the MODEM_DIAG routing is not in place. `rf_route_iq_lanes()` runs after `iq_init()` for exactly this reason.
+- Identical `p_mean` on every channel with a VTX on: the retune is not taking; check `wifi_ch` in `?` changes between channels.
+
+</details>
+
+<details>
+<summary><b>A VTX is on but no channel ever hits</b></summary>
+
+- `h` the channel: if `level_db` rises but `q_phase` stays low, the carrier is not FM-coherent as seen here — it may be off-channel (check `cfo_khz`), or the I/Q lane order is wrong (bits scrambled). If `level_db` does not rise either, the receiver is deaf: full erase and reflash.
+- `mod` = 0 with a strong carrier: an unmodulated source; the detector still hits, `carrier` reports `cw`.
 
 </details>
 
 <details>
 <summary><b><code>video</code> is always <code>none</code> on a real VTX</b></summary>
 
-- Scope the sync separator's CSYNC output: expect a 15.6–15.7 kHz train (up to ~16.3 kHz on an LM1881). No train: check the 0.1 µF coupling and 75 Ω termination on the RX5808 VIDEO pin.
-- Train present but `none`: check `field_hz` in the USB line. It must read 50 or 60; a VSYNC wiring fault leaves it 0.
-- LM1881 outputs are 5 V — the divider to the XIAO is required.
+- `v` shows every window: `swing` must be well above 64 (there is FM deviation), `pulses` > 0 (sync-shaped dips found), `periods` ≥ 2 (they repeat at a line period). Which of those is zero says where the chain breaks.
+- Windows with `pulses` but `periods` = 0: the line period is outside 62–65.5 µs; check `period` in the output.
+- Only PAL fails: PAL is unproven on this receiver — report the windows.
 
 </details>
 
 <details>
-<summary><b>Detections reach the mapper but the ring or bearing is in the wrong place</b></summary>
+<summary><b>Bearings, positions, mesh problems</b></summary>
 
-- The Meshtastic node's shortName/longName must equal `NODE_ID`, or the mapper falls back to the first GPS node in the mesh.
-- Or set the coordinates by hand with `POST /api/node_location`.
-
-</details>
-
-<details>
-<summary><b>Stations disagree about the same drone, or fixes look wrong</b></summary>
-
-- Run the dBm calibration on every station; uncalibrated stations disagree by many dB.
-- Check each station's `RSSI_CAL_OFFSET_DB` and `STATION_HEADING_DEG`.
-- Check station positions: `GET /api/analog_nodes`.
+- Same as v2: switch table from the datasheet, `STATION_HEADING_DEG` measured, Meshtastic node name equals `NODE_ID`, `POST /api/node_location` by hand if needed, dBm calibration on every station in a fleet.
 
 </details>
 
 <details>
-<summary><b>Build fails, or the C5 environment is missing</b></summary>
+<summary><b>Build fails</b></summary>
 
-- Use the *pioarduino IDE* extension (or a recent PlatformIO CLI) with `level1-analog-fpv/` open — not the repository root.
-- The platform is pinned by URL in `platformio.ini`; delete `.pio/` to force a clean re-download.
-- `#error … supports the Seeed XIAO ESP32-S3 and XIAO ESP32-C5 only`: you selected a different board; the pin map comes from the XIAO variants.
-
-</details>
-
-<details>
-<summary><b>Upload cannot connect</b></summary>
-
-- ESP32-C5: hold **BOOT**, tap **RESET**, release **BOOT**, retry.
-- On Linux check udev rules and `dialout` membership, then `ls /dev/ttyACM* /dev/ttyUSB*`.
-- With several boards attached, set `upload_port` in `platformio.ini`.
-
-</details>
-
-<details>
-<summary><b>Blank or garbage messages on the mesh at boot</b></summary>
-
-- The firmware parks the UART TX line high before the USB wait for exactly this reason. If it still happens, check that D4 goes to the Heltec **RX** pin and that GND is shared.
+- Open `level1-c5phy/` in PlatformIO, not the repository root.
+- `#error … supports the Seeed XIAO ESP32-C5 only`: you selected another board.
+- `undefined reference to phy_set_freq` (or another `phy_*`): the platform is not the pinned one; delete `.pio/` and rebuild, or re-check the symbols in the new `libphy.a` before bumping the pin.
 
 </details>
 
@@ -608,11 +688,17 @@ default configuration and run `mapper_test/analog_fusion_test.py` on `main`.
 
 ## 📄 **License**
 
-MIT, as is the upstream project it is derived from.
+The repository is MIT, as is the upstream project it is derived from.
+**`level1-c5phy/` is GPL-3.0-only**: its PHY front end, capture path and metrics
+derive from [C5VRX](https://github.com/colonelpanichacks/c5vrx), which is
+distributed under GPL-3.0-only. The two licences live side by side because the
+two firmware projects are separate programs; do not copy code from
+`level1-c5phy/` into the MIT-licensed projects.
 
 ## 🙏 **Acknowledgments**
 
 - **ColonelPanic** and **Luke Switzer** — the original [drone-mesh-mapper](https://github.com/colonelpanichacks/drone-mesh-mapper)
+- **C5VRX** (Twotoz, ItsReckliss and contributors) — the discovery that the ESP32-C5's Wi-Fi PHY receives analog 5.8 GHz video, and every register on which v3 stands
 - **"Alik",** 93rd OMBr, and **"Ivan",** 427th Rarog, Armed Forces of Ukraine
 - **pioarduino** — the maintained Arduino-ESP32 platform for PlatformIO that makes the C5 build possible
-- **RotorHazard / Chorus** — the RTC6715 synthesizer register formula
+- **RotorHazard / Chorus** — the RTC6715 synthesizer register formula (v2)
