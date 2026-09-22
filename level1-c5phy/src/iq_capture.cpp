@@ -67,8 +67,11 @@ bool iq_capture(const uint8_t** out) {
     rcfg.flags.partial_rx_en  = 0;
     rcfg.flags.indirect_mount = 0;
 
-    if (parlio_rx_soft_delimiter_start_stop(s_rx, s_delim, true) != ESP_OK) { s_errors++; return false; }
+    // Driver sequence for a soft delimiter: queue the transaction (mounts the
+    // DMA descriptors), then start the soft receive so data flows into a
+    // ready DMA rather than an unattended FIFO, wait for the EOF, stop.
     esp_err_t err = parlio_rx_unit_receive(s_rx, s_buf, IQ_WINDOW_BYTES, &rcfg);
+    if (err == ESP_OK) err = parlio_rx_soft_delimiter_start_stop(s_rx, s_delim, true);
     if (err == ESP_OK) err = parlio_rx_unit_wait_all_done(s_rx, IQ_CAPTURE_TIMEOUT_MS);
     (void)parlio_rx_soft_delimiter_start_stop(s_rx, s_delim, false);
     if (err != ESP_OK) {

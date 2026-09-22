@@ -555,6 +555,9 @@ static void emit_heartbeat(bool to_usb, bool to_mesh) {
 //   g 2..62 | g a   fixed gain / automatic while holding
 //   v            video check on the held channel (VIDEO_WINDOWS windows)
 //   x            resume scanning
+// Every line it prints carries "info", which mesh-mapper.py drops as a
+// non-detection, so the console is safe to leave enabled on a fielded
+// station. Unknown input is ignored.
 // ============================================================
 #if BENCH_CONSOLE
 
@@ -657,7 +660,9 @@ static void bench_command(const char* cmd) {
         bench_video();
         break;
     default:
-        bench_help();
+        // Anything else is ignored silently. mesh-mapper.py writes
+        // "WATCHDOG_RESET" to every station it opens over USB; answering it
+        // with help text would only clutter the mapper's log.
         break;
     }
 }

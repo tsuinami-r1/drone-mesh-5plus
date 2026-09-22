@@ -18,7 +18,7 @@ the drone from what several stations heard.
 is the receiver.** No RX5808, no sync separator. The v2 station (RX5808 + sync
 separator) it replaces stays on this branch unchanged as the reference design.
 
-[⚡ Quick Start](#-quick-start) • [🧭 Hardware](#-hardware) • [🧪 Bench validation](#-bench-validation-the-gate-before-fielding) • [🔧 Calibration](#-calibration) • [⚙️ Configuration](#️-configuration-reference) • [🔌 Mapper contract](#-mapper-contract) • [🤝 Contributing](#-contributing)
+[⚡ Quick Start](#-quick-start) • [🧭 Hardware](#-hardware) • [🕸️ Joining a mesh](#️-joining-an-existing-detection-mesh) • [🧪 Bench validation](#-bench-validation-the-gate-before-fielding) • [🔧 Calibration](#-calibration) • [⚙️ Configuration](#️-configuration-reference) • [🔌 Mapper contract](#-mapper-contract) • [🤝 Contributing](#-contributing)
 
 </div>
 
@@ -157,16 +157,40 @@ and the [`main`](https://github.com/tsuinami-r1/drone-mesh-5plus) branch running
 
 ### 1 · Install the toolchain and clone
 
-Firmware builds with **PlatformIO in VS Code via the pioarduino IDE extension**.
-Follow [Step 1 on `main`](https://github.com/tsuinami-r1/drone-mesh-5plus/blob/main/README.md#step-1--install-the-toolchain-vs-code--pioarduino)
-for the extension, udev rules and the CLI alternative, then:
+Firmware builds with **PlatformIO inside VS Code, through the pioarduino IDE
+extension**. `platformio.ini` pins the pioarduino `platform-espressif32` release
+(`55.03.39`): the XIAO ESP32-C5 needs Arduino-ESP32 core 3.x, which the stock
+PlatformIO `espressif32` platform never adopted, and this firmware additionally
+links PHY symbols verified against that exact release. Arduino IDE is not supported.
 
-```bash
-git clone --branch level1-c5phy https://github.com/tsuinami-r1/drone-mesh-5plus.git level1-c5phy
-```
+1. Install [Visual Studio Code](https://code.visualstudio.com/).
+2. Open the Extensions view (`Ctrl+Shift+X` / `Cmd+Shift+X`), search for
+   **`pioarduino`**, and install **pioarduino IDE** (publisher *pioarduino*). If the
+   official *PlatformIO IDE* extension is installed, disable it first; both register
+   the same commands.
+3. Wait for the status bar to finish "Installing PlatformIO Core" and reload VS Code
+   when prompted. A PlatformIO alien-head icon appears in the activity bar.
+4. **Linux only:** install the udev rules so the XIAO enumerates without root, add
+   yourself to the serial group, then log out and in:
+   ```bash
+   curl -fsSL https://raw.githubusercontent.com/platformio/platformio-core/develop/platformio/assets/system/99-platformio-udev.rules \
+     | sudo tee /etc/udev/rules.d/99-platformio-udev.rules
+   sudo udevadm control --reload-rules && sudo udevadm trigger
+   sudo usermod -aG dialout $USER     # 'uucp' on Arch
+   ```
+5. Clone this branch:
+   ```bash
+   git clone --branch level1-c5phy https://github.com/tsuinami-r1/drone-mesh-5plus.git level1-c5phy
+   ```
+6. In VS Code use **File → Open Folder…** on `level1-c5phy/level1-c5phy/` — the
+   project folder, **not** the repository root, or PlatformIO will not find the
+   environment. The first open downloads the platform, toolchain and framework
+   (several hundred MB); let it finish before building.
 
-In VS Code use **File → Open Folder…** on `level1-c5phy/` — the project folder,
-**not** the repository root, or PlatformIO will not find the environment.
+> **Command-line alternative.** The same project builds headless with the
+> PlatformIO CLI (`pipx install platformio` or `pip install platformio`), including
+> on a Raspberry Pi. Every `pio` command below is run from inside `level1-c5phy/`.
+> The platform pin in `platformio.ini` means no other setup is needed.
 
 <br>
 
@@ -200,22 +224,56 @@ and one that is new in v3 and only matters if the heartbeat reports `tune_fail`:
 
 ### 4 · Flash — **full erase first**
 
+Plug the XIAO ESP32-C5 in over USB-C. Nothing else needs to be connected for the
+first flash. **Every flash of this firmware starts with a full erase**: the erase
+clears the Wi-Fi PHY's stored calibration data, and C5VRX found that stale
+calibration state left by a previous firmware leaves the receive chain mistuned or
+deaf. Repeat the erase whenever a station stops hearing a VTX it heard before.
+
+**From VS Code** (PlatformIO icon in the activity bar → **Project Tasks** →
+`seeed_xiao_esp32c5`):
+
+1. **General → Build** to compile. There must be no errors.
+2. **Platform → Erase Flash**.
+3. **General → Upload**. PlatformIO auto-detects the port; with several boards
+   attached, add `upload_port = /dev/ttyACM0` (macOS `/dev/cu.usbmodem…`, Windows
+   `COM7`) to the env in `platformio.ini`.
+4. **General → Monitor** to open the serial monitor at 115200.
+
+**From the command line**, inside `level1-c5phy/`:
+
 ```bash
-cd level1-c5phy
-pio run -e seeed_xiao_esp32c5 --target erase      # mandatory before the first flash and after any PHY trouble
-pio run -e seeed_xiao_esp32c5 --target upload
+pio run -e seeed_xiao_esp32c5                       # build
+pio run -e seeed_xiao_esp32c5 --target erase        # full erase — do not skip
+pio run -e seeed_xiao_esp32c5 --target upload       # build + flash
+pio device monitor --baud 115200                    # serial monitor
 ```
 
-The erase clears the Wi-Fi PHY's stored calibration data. C5VRX found that stale
-calibration state from a previous firmware leaves the receive chain mistuned or
-deaf; every one of their flashing guides starts with `erase_flash`. Do the same.
+Add `--upload-port /dev/ttyACM0` (or the port shown by `pio device list`) to the
+erase and upload commands when more than one board is attached.
 
-> **ESP32-C5 will not connect?** Hold **BOOT**, tap **RESET**, release **BOOT**,
-> then immediately re-run.
+**Without the toolchain**, with the prebuilt image in
+[`firmware/`](firmware/README.md). It is a merged image (bootloader, partition
+table, app) built with the default configuration (`RX01`, heading 0, binary switch
+table, unmeasured calibration), so it is for bench testing only:
+
+```bash
+pip install esptool
+esptool.py --chip esp32c5 --port /dev/ttyACM0 erase_flash
+esptool.py --chip esp32c5 --port /dev/ttyACM0 --baud 460800 write_flash 0x0 firmware/level1-v3-c5phy-factory.bin
+```
+
+> **The C5 will not connect** (`Failed to connect`, or the upload stalls at
+> `Connecting...`): hold **BOOT**, tap **RESET**, release **BOOT**, then immediately
+> re-run the erase or upload. After the flash, tap **RESET** once if the monitor
+> stays silent.
 >
-> **No toolchain?** [`firmware/`](firmware/README.md) holds a prebuilt merged
-> image with the default configuration — `RX01`, heading 0, binary switch table,
-> unmeasured calibration — for bench testing only.
+> **Port not found on Linux:** the udev rules and `dialout` membership from step 1,
+> then `ls /dev/ttyACM*`. The C5 enumerates as a USB-JTAG/serial device, not as
+> `/dev/ttyUSB*`.
+>
+> **After any reflash** the station comes up with its configuration baked in;
+> `NODE_ID`, heading and the switch table cannot be changed without rebuilding.
 
 <br>
 
@@ -259,44 +317,142 @@ tens of dB, `gain` stepping down from 62 as the 4-bit I/Q starts clipping,
 `"video":1,"std":"NTSC"` (or PAL) and a `line_hz` near 15734 (or 15625).
 
 Only when both halves of that work is the receiver alive; carry on to the
-[bench validation](#-bench-validation-the-gate-before-fielding) list.
+[bench validation](#-bench-validation-the-gate-before-fielding) list. Every line
+the console prints carries `"info"`, which the mapper drops as a non-detection, so
+the console can stay enabled on a fielded station.
 
 <br>
 
-### 6 · Wire the Heltec and name the node
+### 6 · Wire the Heltec and join the mesh
 
-Three wires: XIAO **D4** → Heltec RX, XIAO **D5** ← Heltec TX, GND ↔ GND. Set the
-Heltec's Meshtastic serial module to `TEXTMSG` at 115200 and **name the node after
-`NODE_ID`**:
-
-```bash
-meshtastic --set-owner "RX01" --set-owner-short "RX01"
-```
-
-Full Meshtastic setup is [Step 5 on `main`](https://github.com/tsuinami-r1/drone-mesh-5plus/blob/main/README.md#step-5--wire-the-node-to-its-heltec-and-configure-meshtastic).
+Three wires: XIAO **D4** → Heltec RX, XIAO **D5** ← Heltec TX, GND ↔ GND. Configure
+the Heltec exactly like the existing mesh's nodes and name it after `NODE_ID`; the
+full procedure, including matching the mesh's channel and key, is in
+[Joining an existing detection mesh](#️-joining-an-existing-detection-mesh).
 
 <br>
 
 ### 7 · Calibrate, then put it on the map
 
 Do the three [calibrations](#-calibration): threshold, dBm and bearing pattern.
-Then start `mesh-mapper.py` from `main` and give the station a position, since it
-has no GPS of its own:
+Then give the station a position in `mesh-mapper.py`, since it has no GPS of its
+own (details in the mesh section):
 
 ```bash
-# Automatic — polls the Heltec every 30 s
-curl -X POST http://localhost:5000/api/meshtastic_url \
-     -d '{"node_id":"RX01","url":"http://192.168.1.x"}' -H 'Content-Type: application/json'
-
-# Or by hand
 curl -X POST http://localhost:5000/api/node_location \
      -d '{"node_id":"RX01","lat":25.7617,"lon":-80.1918}' -H 'Content-Type: application/json'
 ```
 
-Detections arrive over the mesh via the home node. For bench testing, plug the
+Detections then arrive over the mesh via the home node. For bench testing, plug the
 XIAO into the mapper host over USB and pick its port in the Settings panel: the
 mapper needs **no change** for a v3 station (it already labels `receiver:"c5phy"`
 as 5.8 GHz by frequency and prefers `rssi_dbm` over the raw count).
+
+---
+
+## 🕸️ **Joining an existing detection mesh**
+
+An existing mesh is a set of Level 2 nodes and v2 stations, each wired to a Heltec
+running Meshtastic, one home Heltec wired to a XIAO running the `home_node` bridge,
+and `mesh-mapper.py` on the host behind it. A v3 station joins as one more
+Meshtastic node speaking the same JSON. Nothing changes at the home end or in the
+mapper; the work is on the new station's Heltec and one registration call.
+
+### A · Flash and configure the station's Heltec
+
+1. Flash stock [Meshtastic](https://meshtastic.org/) to a Heltec WiFi LoRa 32 V3
+   (web flasher or the Meshtastic CLI: `pip install meshtastic`).
+2. **Put it on the existing mesh's channel.** Every Heltec in the mesh must share
+   the same LoRa region, modem preset and primary channel key, or the station's
+   lines never reach the home node. Copy them from any node already in the mesh:
+   ```bash
+   meshtastic --port /dev/ttyUSB0 --qr                  # on an existing node: prints its channel URL
+   meshtastic --port /dev/ttyUSB1 --seturl 'https://meshtastic.org/e/#…'   # on the new Heltec
+   meshtastic --port /dev/ttyUSB1 --set lora.region <same region as the mesh>
+   ```
+3. **Enable the serial module in text-message mode** on the pins you wire, the same
+   settings as every other node in the mesh (the reference build uses GPIO 19 / 20
+   on the Heltec):
+   ```bash
+   meshtastic --port /dev/ttyUSB1 \
+              --set serial.enabled true \
+              --set serial.mode TEXTMSG \
+              --set serial.baud BAUD_115200 \
+              --set serial.rxd 19 --set serial.txd 20
+   ```
+4. **Name the node exactly `NODE_ID`** (both names, so either lookup matches):
+   ```bash
+   meshtastic --port /dev/ttyUSB1 --set-owner "RX01" --set-owner-short "RX01"
+   ```
+   The mapper resolves a station's position by this name first and only falls back
+   to the first GPS-equipped node in the mesh. In a dense mesh a wrong name draws
+   the ring at another node's position. Keep `NODE_ID` unique across the whole
+   mesh, v2 and v3 stations alike.
+
+### B · Wire and power
+
+XIAO **D4** (GPIO23) → Heltec **RX** (GPIO 19 in the reference build), XIAO **D5**
+(GPIO24) ← Heltec **TX** (GPIO 20), GND ↔ GND. Power the Heltec from the station's
+5 V rail with the 1000 µF capacitor close to it. The firmware parks D4 high before
+anything else runs, so a rebooting station does not spray bytes onto the mesh.
+
+### C · The home end stays as it is
+
+The home node forwards any JSON line that contains `"analog_fm"` **without** MAC
+deduplication, because several stations legitimately report the same synthetic
+MAC for one channel, and it passes station heartbeats (which carry no `mac`)
+through unchanged. Both were already true for v2 stations. A mesh that has never
+carried a Level 1 station needs its home node rebuilt from `main` at or after
+commit `d001449` (the differential-RSSI multilateration change, which added the
+analog FM bypass); an older home node would deduplicate the stations' shared
+synthetic MAC and drop every report but the first.
+
+### D · Register the station's position
+
+The station has no GPS. Give the mapper its position once, by either route:
+
+```bash
+# Automatic — the mapper polls the station's Heltec over HTTP every 30 s
+curl -X POST http://localhost:5000/api/meshtastic_url \
+     -d '{"node_id":"RX01","url":"http://192.168.1.x"}' -H 'Content-Type: application/json'
+
+# By hand — surveyed coordinates (preferred for a fixed station)
+curl -X POST http://localhost:5000/api/node_location \
+     -d '{"node_id":"RX01","lat":25.7617,"lon":-80.1918}' -H 'Content-Type: application/json'
+```
+
+`GET http://localhost:5000/api/analog_nodes` lists every Level 1 station the mapper
+has heard, with `alive`, `threshold_dbm`, `receiver` (`c5phy` for this station) and
+its position.
+
+### E · Verify end to end
+
+1. Power the station. Within two minutes its first mesh heartbeat arrives: the home
+   XIAO's USB output shows the raw `{"heartbeat":true,"node_id":"RX01","receiver":"c5phy",…}`
+   line and `/api/analog_nodes` shows `RX01` alive with its `threshold_dbm`.
+2. Key a VTX near the station. Within ~10 s (the per-channel mesh interval) the home
+   XIAO prints the compact detection line, the mapper log shows
+   `[c5phy] Analog FM signal: Band=R3 …`, and a range ring with a bearing line
+   appears at the station's position.
+3. With a second Level 1 station in range, v2 or v3, `GET /api/analog_fixes` returns
+   a position fix once both have reported the same emitter within 25 s.
+
+If the home XIAO shows the station's lines prefixed `[MESH]`, the Heltec's serial
+module is not in `TEXTMSG` mode or the line was mangled; if nothing arrives at all,
+the channel key or region differs from the mesh's.
+
+### Mixed fleets and airtime
+
+- v2 (RX5808) and v3 (C5 PHY) stations coexist. The mapper treats them identically:
+  it clusters reports by frequency, fuses their `rssi_dbm`, and needs every station's
+  dBm line calibrated (sheet 7 of the bench guide) so the fleet agrees on one source.
+- A v3 station puts at most one 191-byte line per detected channel on the mesh every
+  10 s, plus one heartbeat every 120 s: the same airtime budget as v2, fixed in
+  `config.h` (`MESH_REPORT_INTERVAL_MS`, `MESH_HEARTBEAT_INTERVAL_MS`).
+- **USB instead of the mesh.** For the bench, or a station next to the host, plug
+  the XIAO straight into the mapper host and select its port in the Settings panel.
+  The mapper writes `WATCHDOG_RESET` to every port it opens; the station's console
+  ignores it.
 
 ---
 
