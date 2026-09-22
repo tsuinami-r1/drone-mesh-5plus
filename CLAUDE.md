@@ -29,7 +29,12 @@ live on `main` and must not be copied here.
 5. If the v3 emitted JSON changed, rebuild `firmware/level1-v3-c5phy-factory.bin`
    from the default configuration (it is the `firmware.factory.bin` PlatformIO
    produces, flashed at 0x0 after a full erase)
-6. Never add mapper, Level 2 or home-node code to this branch
+6. If pins, the BOM, the serial output or the bench procedure changed, update
+   `docs/bench-guide-src/Level1-Station-v3-C5PHY-Bench-Guide.html` (and the
+   diagrams `docs/level1-v3-*.svg` it inlines) and regenerate the PDF with
+   `python3 docs/bench-guide-src/build.py` (headless Chromium); commit both.
+   Check every sheet for clipped content: each sheet is a fixed A4 box
+7. Never add mapper, Level 2 or home-node code to this branch
 
 ## Licence boundary
 

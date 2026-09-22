@@ -96,10 +96,13 @@ One v3 station is:
 | Power | 20 W panel, MPPT charger with 5 V out, 4 × 18650 (≈ 50 Wh) | Station load ≈ 1.0 W (the PHY replaces the 0.6 W RX5808 with ~0.4 W of radio) |
 
 Gone from the v2 BOM: RX5808, sync separator, video coupling parts, the RX5808
-SPI wiring. The full design is in
-📄 [**`docs/LEVEL1-V3-C5PHY-HARDWARE.md`**](docs/LEVEL1-V3-C5PHY-HARDWARE.md)
-(parts, pin budget, how the receiver works, power budget, open questions). The v2
-design stays documented in [`docs/LEVEL1-V2-HARDWARE.md`](docs/LEVEL1-V2-HARDWARE.md).
+SPI wiring. Two documents carry the full design:
+
+- 📄 [**`docs/LEVEL1-V3-C5PHY-HARDWARE.md`**](docs/LEVEL1-V3-C5PHY-HARDWARE.md) — parts, pin budget, how the receiver works, power budget, open questions, bench log
+- 🖨️ [**`docs/Level1-Station-v3-C5PHY-Bench-Guide.pdf`**](docs/Level1-Station-v3-C5PHY-Bench-Guide.pdf) — printable eight-sheet A4 bench guide: block diagram, wiring list and BOM with tick boxes, expected serial output, and the seven-stage procedure with blanks for every value you measure (source in `docs/bench-guide-src/`)
+
+The v2 design stays documented in [`docs/LEVEL1-V2-HARDWARE.md`](docs/LEVEL1-V2-HARDWARE.md)
+and its own [bench guide](docs/Level1-Station-v2-Bench-Guide.pdf).
 
 ### Pins
 
@@ -299,7 +302,9 @@ as 5.8 GHz by frequency and prefers `rssi_dbm` over the raw count).
 
 ## 🧪 **Bench validation — the gate before fielding**
 
-Everything below is a real unknown, in the order it blocks the rest. Record the
+Everything below is a real unknown, in the order it blocks the rest. The
+[printable bench guide](docs/Level1-Station-v3-C5PHY-Bench-Guide.pdf) walks the
+same checks as a seven-stage procedure with blanks for every value; record the
 numbers in `docs/LEVEL1-V3-C5PHY-HARDWARE.md` §7 as you go.
 
 1. **Does the PHY come up receive-only and stream I/Q?** Boot line `"rf":true`,

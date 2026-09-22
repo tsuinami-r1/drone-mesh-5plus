@@ -2,10 +2,15 @@
 
 Status: **firmware implemented and building; nothing bench validated.** This is
 the build spec for the v3 station and the record of what is and is not proven.
-The firmware in `level1-c5phy/` implements it. The v2 station it replaces is
-documented in [`LEVEL1-V2-HARDWARE.md`](LEVEL1-V2-HARDWARE.md); everything not
-mentioned here (enclosure, patches, switch, solar power, Heltec) is unchanged
-from v2.
+The firmware in `level1-c5phy/` implements it. The printable
+[**bench guide**](Level1-Station-v3-C5PHY-Bench-Guide.pdf) (eight A4 sheets:
+wiring list, BOM with tick boxes, the receiver explained, expected serial
+output, and a seven-stage procedure with blanks for every value you measure) is
+what turns this into a fielded unit; its source is `bench-guide-src/` and
+`python3 docs/bench-guide-src/build.py` regenerates it. The v2 station it
+replaces is documented in [`LEVEL1-V2-HARDWARE.md`](LEVEL1-V2-HARDWARE.md);
+everything not mentioned here (enclosure, patches, switch, solar power, Heltec)
+is unchanged from v2.
 
 The idea, from the [C5VRX](https://github.com/colonelpanichacks/c5vrx) project:
 the ESP32-C5's 5 GHz Wi-Fi radio covers 5.15–5.9 GHz with a 40 MHz filter, its
@@ -13,6 +18,13 @@ synthesizer can be told any frequency in MHz, and its modem exposes raw I/Q
 samples on a diagnostic bus that another peripheral can read. Analog FPV video
 is wideband FM around 5.6–5.95 GHz. So the C5 already contains a 5.8 GHz FM
 receiver; the RX5808 and the sync separator only need replacing with software.
+
+![block diagram](level1-v3-block-diagram.svg)
+
+*Four patches → SP4T → the XIAO's U.FL. Inside the C5: the Wi-Fi PHY held
+receive-only on the FPV frequency, its raw I/Q out through eight GPIO lanes and
+back into PARLIO, the firmware measuring power, coherence and sync. The XIAO's
+3V3 LDO feeds the switch; the 5 V rail feeds the XIAO and the Heltec.*
 
 ```
   4 patches ──► SP4T ──► U.FL ──► ESP32-C5 Wi-Fi PHY (5 GHz, BW40, fixed gain)
@@ -299,7 +311,10 @@ C5 figure is an estimate from the C5 datasheet's receive current; measure it.
 
 ## 7. Bench log
 
-Blank until a v3 board is built. Record here, per check in the README's
-validation list: date, board, firmware commit, VTX and camera used, and the
+Blank until a v3 board is built. Work through the
+[bench guide](Level1-Station-v3-C5PHY-Bench-Guide.pdf) and copy its blanks
+here, per stage: date, board, firmware commit, VTX and camera used, and the
 numbers (`level_db` at each attenuation, `line_hz` per standard, `tune_fail`,
-sweep time from `sweeps` in consecutive heartbeats).
+the switch truth table, K, sweep time from `sweeps` in consecutive heartbeats).
+
+![sector layout](level1-v3-sector-layout.svg)

@@ -1,0 +1,177 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 640" role="img" aria-label="Level 1 station v3 block diagram: four sector patch antennas through an SP4T RF switch into the XIAO ESP32-C5's U.FL antenna port; inside the C5 the 5 GHz Wi-Fi PHY receives, its raw I/Q diagnostic bus is routed out through eight GPIO-matrix lanes and read back by PARLIO into DMA windows, and the firmware turns them into a level, a coherence test, a bearing and a video check; the XIAO talks to the Heltec over UART on D4/D5; a solar, charger, battery, 5 V rail power chain" font-family="Liberation Sans, IBM Plex Sans, Segoe UI, Helvetica, Arial, sans-serif" font-size="12" style="color:#16202A">
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+    <marker id="arr-rf" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#0F7F73"/>
+    </marker>
+    <marker id="arr-iq" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#C25A1D"/>
+    </marker>
+    <marker id="arr-pwr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#8A6D00"/>
+    </marker>
+  </defs>
+
+  <!-- ===== Sector antennas ===== -->
+  <g stroke="currentColor" fill="none" stroke-width="1.2">
+    <rect x="40" y="70" width="110" height="46" rx="3"/>
+    <rect x="40" y="140" width="110" height="46" rx="3"/>
+    <rect x="40" y="210" width="110" height="46" rx="3"/>
+    <rect x="40" y="280" width="110" height="46" rx="3"/>
+  </g>
+  <g fill="currentColor" text-anchor="middle">
+    <text x="95" y="89" font-weight="600">Patch N (0°)</text><text x="95" y="106" font-size="10.5">8 dBi · ~70° beam</text>
+    <text x="95" y="159" font-weight="600">Patch E (90°)</text><text x="95" y="176" font-size="10.5">8 dBi · ~70° beam</text>
+    <text x="95" y="229" font-weight="600">Patch S (180°)</text><text x="95" y="246" font-size="10.5">8 dBi · ~70° beam</text>
+    <text x="95" y="299" font-weight="600">Patch W (270°)</text><text x="95" y="316" font-size="10.5">8 dBi · ~70° beam</text>
+  </g>
+  <!-- coax to switch -->
+  <g stroke="#0F7F73" stroke-width="2.2" fill="none" marker-end="url(#arr-rf)">
+    <path d="M150,93 H185 V158 H222"/>
+    <path d="M150,163 H222"/>
+    <path d="M150,233 H222"/>
+    <path d="M150,303 H185 V238 H222"/>
+  </g>
+  <text x="186" y="132" font-size="10" fill="#0F7F73">equal-length coax</text>
+
+  <!-- ===== SP4T switch ===== -->
+  <rect x="224" y="120" width="130" height="150" rx="4" stroke="currentColor" fill="none" stroke-width="1.2"/>
+  <g fill="currentColor" text-anchor="middle">
+    <text x="289" y="145" font-weight="600">SP4T RF switch</text>
+    <text x="289" y="162" font-size="10.5">SKY13322-375LF /</text>
+    <text x="289" y="176" font-size="10.5">PE42442 · 0.1–6 GHz</text>
+    <text x="289" y="196" font-size="10.5">IL ≈ 0.5 dB · 3.3 V logic</text>
+    <text x="289" y="216" font-size="10.5">switch settle &lt; 1 µs</text>
+    <text x="289" y="256" font-size="10" fill="#0F7F73">RF common</text>
+  </g>
+
+  <!-- switch -> XIAO U.FL -->
+  <path d="M354,195 H418" stroke="#0F7F73" stroke-width="2.2" fill="none" marker-end="url(#arr-rf)"/>
+  <text x="386" y="188" font-size="10" fill="#0F7F73" text-anchor="middle">u.FL ≤ 5 cm</text>
+
+  <!-- ===== XIAO ESP32-C5 = receiver + MCU ===== -->
+  <rect x="420" y="60" width="450" height="380" rx="4" stroke="currentColor" fill="none" stroke-width="1.6"/>
+  <g fill="currentColor" text-anchor="middle">
+    <text x="645" y="84" font-weight="600" font-size="13">XIAO ESP32-C5 — receiver and MCU</text>
+    <text x="645" y="100" font-size="10.5">the 5 GHz Wi-Fi PHY is the 5.8 GHz analog FM front end</text>
+  </g>
+
+  <!-- inner block A: PHY -->
+  <rect x="436" y="118" width="200" height="92" rx="3" stroke="currentColor" fill="none" stroke-width="1.1"/>
+  <g fill="currentColor" text-anchor="middle">
+    <text x="536" y="140" font-weight="600">5 GHz Wi-Fi PHY</text>
+    <text x="536" y="156" font-size="10.5">receive-only: TX queues disabled</text>
+    <text x="536" y="170" font-size="10.5">BW40 · packet AGC off</text>
+    <text x="536" y="184" font-size="10.5">gain forced 62 → 2 (≈1 dB/step)</text>
+    <text x="536" y="198" font-size="10.5">phy_set_freq → exact FPV MHz</text>
+  </g>
+
+  <!-- inner block B: I/Q lanes -->
+  <rect x="686" y="118" width="168" height="92" rx="3" stroke="currentColor" fill="none" stroke-width="1.1"/>
+  <g fill="currentColor" text-anchor="middle">
+    <text x="770" y="140" font-weight="600">I/Q diagnostic bus</text>
+    <text x="770" y="156" font-size="10.5">4-bit I + 4-bit Q · 80 MS/s</text>
+    <text x="770" y="170" font-size="10.5">8 GPIO-matrix lanes:</text>
+    <text x="770" y="184" font-size="10.5" font-family="Liberation Mono, IBM Plex Mono, Consolas, monospace">D0 D1 D3 D10 GPIO2-5</text>
+    <text x="770" y="198" font-size="10.5" fill="#C25A1D">pads must stay unconnected</text>
+  </g>
+  <path d="M636,164 H684" stroke="#C25A1D" stroke-width="2" fill="none" marker-end="url(#arr-iq)"/>
+  <text x="660" y="158" font-size="9.5" fill="#C25A1D" text-anchor="middle">MODEM_DIAG</text>
+
+  <!-- B -> C: out to the pad and back in -->
+  <path d="M770,210 V240" stroke="#C25A1D" stroke-width="2" fill="none" marker-end="url(#arr-iq)"/>
+  <text x="778" y="230" font-size="9.5" fill="#C25A1D">via the pad, back in</text>
+
+  <!-- inner block C: PARLIO -->
+  <rect x="686" y="242" width="168" height="64" rx="3" stroke="currentColor" fill="none" stroke-width="1.1"/>
+  <g fill="currentColor" text-anchor="middle">
+    <text x="770" y="264" font-weight="600">PARLIO RX + DMA</text>
+    <text x="770" y="280" font-size="10.5">40 MS/s · 16 KiB window</text>
+    <text x="770" y="294" font-size="10.5">= 410 µs = 6.4 video lines</text>
+  </g>
+  <path d="M686,274 H638" stroke="#C25A1D" stroke-width="2" fill="none" marker-end="url(#arr-iq)"/>
+  <text x="662" y="288" font-size="9.5" fill="#C25A1D" text-anchor="middle">0.4 ms / capture</text>
+
+  <!-- inner block D: firmware -->
+  <rect x="436" y="242" width="200" height="120" rx="3" stroke="currentColor" fill="none" stroke-width="1.1"/>
+  <g fill="currentColor" text-anchor="middle">
+    <text x="536" y="264" font-weight="600">Firmware (level1-c5phy)</text>
+    <text x="536" y="280" font-size="10.5">power → level dB → dBm</text>
+    <text x="536" y="294" font-size="10.5">FM coherence ≥ 40 % = carrier</text>
+    <text x="536" y="308" font-size="10.5">carrier offset → freq_peak</text>
+    <text x="536" y="322" font-size="10.5">FM demod → H-sync → PAL/NTSC</text>
+    <text x="536" y="336" font-size="10.5">4 sectors → bearing · fp</text>
+    <text x="536" y="350" font-size="10.5">sweep 40 ch × 4 sectors ≈ 2 s</text>
+  </g>
+
+  <!-- pin labels -->
+  <g fill="currentColor" font-family="Liberation Mono, IBM Plex Mono, Consolas, monospace" font-size="10.5">
+    <text x="446" y="390">D2 D8 D9  SEL</text>
+    <text x="446" y="410">D6 D7 free (UART0)</text>
+    <text x="800" y="396">D4 TX →</text>
+    <text x="800" y="412">← D5 RX</text>
+  </g>
+
+  <!-- sector select: XIAO -> SP4T -->
+  <path d="M438,386 H400 V300 H330 V272" stroke="currentColor" stroke-width="1.4" fill="none" marker-end="url(#arr)"/>
+  <text x="335" y="314" font-size="10" fill="currentColor">sector select, 4 × per channel</text>
+
+  <!-- ===== Heltec ===== -->
+  <rect x="930" y="340" width="150" height="90" rx="4" stroke="currentColor" fill="none" stroke-width="1.2"/>
+  <g fill="currentColor" text-anchor="middle">
+    <text x="1005" y="364" font-weight="600">Heltec LoRa 32 V3</text>
+    <text x="1005" y="381" font-size="10.5">Meshtastic, TEXTMSG</text>
+    <text x="1005" y="395" font-size="10.5">name = NODE_ID</text>
+    <text x="1005" y="415" font-size="10.5">5 V · ~80 mA</text>
+  </g>
+  <path d="M870,392 H928" stroke="currentColor" stroke-width="1.4" fill="none" marker-end="url(#arr)"/>
+  <path d="M928,408 H872" stroke="currentColor" stroke-width="1.4" fill="none" marker-end="url(#arr)"/>
+  <text x="899" y="386" font-size="10" fill="currentColor" text-anchor="middle">UART 115200</text>
+  <text x="899" y="428" font-size="9.5" fill="currentColor" text-anchor="middle">JSON ≤ 191 B</text>
+  <!-- mesh out -->
+  <path d="M1005,340 V300" stroke="currentColor" stroke-width="1.4" fill="none" stroke-dasharray="4 3" marker-end="url(#arr)"/>
+  <text x="1005" y="290" font-size="10.5" fill="currentColor" text-anchor="middle">LoRa mesh → home node → mapper</text>
+
+  <!-- ===== Power chain ===== -->
+  <g stroke="currentColor" fill="none" stroke-width="1.2">
+    <rect x="40" y="500" width="130" height="70" rx="3"/>
+    <rect x="230" y="500" width="190" height="70" rx="3"/>
+    <rect x="470" y="500" width="130" height="70" rx="3"/>
+  </g>
+  <g fill="currentColor" text-anchor="middle">
+    <text x="105" y="524" font-weight="600">Solar panel</text>
+    <text x="105" y="541" font-size="10.5">20 W · 18 V nominal</text>
+    <text x="105" y="555" font-size="10.5">south-facing, 30–45° tilt</text>
+    <text x="325" y="524" font-weight="600">Charger / power manager</text>
+    <text x="325" y="541" font-size="10.5">MPPT Li-ion, 5 V / 1 A out</text>
+    <text x="325" y="555" font-size="10.5">(e.g. DFRobot DFR0559)</text>
+    <text x="535" y="524" font-weight="600">Battery</text>
+    <text x="535" y="541" font-size="10.5">4 × 18650 3500 mAh</text>
+    <text x="535" y="555" font-size="10.5">1S4P ≈ 50 Wh</text>
+  </g>
+  <g stroke="#8A6D00" stroke-width="2" fill="none" stroke-dasharray="6 4">
+    <path d="M170,535 H228" marker-end="url(#arr-pwr)"/>
+    <path d="M420,535 H468" marker-end="url(#arr-pwr)"/>
+    <path d="M325,500 V480 H1005 V432" marker-end="url(#arr-pwr)"/>
+    <path d="M700,480 V442" marker-end="url(#arr-pwr)"/>
+    <path d="M470,440 V460 H250 V272" marker-end="url(#arr-pwr)"/>
+  </g>
+  <g fill="#8A6D00" font-size="10">
+    <text x="740" y="494">5 V rail (≈1.0 W total)</text>
+    <text x="300" y="454">3V3 from XIAO LDO → SP4T VDD</text>
+  </g>
+
+  <!-- ===== Legend ===== -->
+  <g font-size="10.5">
+    <line x1="700" y1="600" x2="740" y2="600" stroke="#0F7F73" stroke-width="2.2"/>
+    <text x="746" y="604" fill="currentColor">RF 5.8 GHz</text>
+    <line x1="820" y1="600" x2="860" y2="600" stroke="#C25A1D" stroke-width="2"/>
+    <text x="866" y="604" fill="currentColor">raw I/Q</text>
+    <line x1="940" y1="600" x2="980" y2="600" stroke="#8A6D00" stroke-width="2" stroke-dasharray="6 4"/>
+    <text x="986" y="604" fill="currentColor">power</text>
+    <line x1="1030" y1="600" x2="1060" y2="600" stroke="currentColor" stroke-width="1.4"/>
+    <text x="1064" y="604" fill="currentColor">logic</text>
+  </g>
+</svg>
