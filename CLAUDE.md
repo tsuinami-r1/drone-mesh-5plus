@@ -57,15 +57,28 @@
   −60/−75 dBm. Never reintroduce raw-count assumptions: counts differ between the
   S3 and C5 ADCs
 - Multi-station fusion: `ANALOG_OBS` (per mac, per node) → `_analog_refresh_fixes()`
-  (frequency clustering, `_analog_solve()` grid search with closed-form TX power,
-  silent-station penalties, mirror-basin detection) → `ANALOG_FIXES`, `analog_fix`
-  socket event, `/api/analog_fixes`, `_tak_enqueue_fix()`. `NODE_STATUS` (own lock)
-  holds liveness + `threshold_dbm` from heartbeats; the serial reader must call
+  (`_analog_cluster()`: width-bounded frequency clustering + video fingerprint;
+  `_analog_solve()` grid search with closed-form TX power, silent-station penalties,
+  bearing residuals, mirror-basin detection) → `ANALOG_FIXES`, `analog_fix` socket
+  event, `/api/analog_fixes`, `_tak_enqueue_fix()`. `NODE_STATUS` (own lock) holds
+  liveness + `threshold_dbm` from heartbeats; the serial reader must call
   `_analog_note_node()` on a Level 1 heartbeat *before* dropping it
-- Level 1 v2 stations also emit `hw`, `sectors`, `sector`, `bearing_deg`,
-  `bearing_sigma_deg`, `freq_peak`, `video`, `sync_hz`, `field_hz`, `sync_q`, `fp`.
-  These are stored and re-emitted untouched today; using bearings as a solver residual
-  and `fp` as a clustering key is the next change here
+- Clustering is a bound on a cluster's total width (`ANALOG_CLUSTER_MHZ`, strict),
+  never a neighbour-to-neighbour chain: chaining merged whole 20 MHz-spaced bands
+  (A, B, F) into one emitter. 15 MHz is derived from the 40-channel table (same-carrier
+  picks ≤ 14 MHz apart, distinct channels ≥ 19); do not raise it back to 20
+- Level 1 v2 keys: `bearing_deg`/`bearing_sigma_deg` are a residual in
+  `_analog_solve(bearings=…)`; `fp`/`video`/`freq_peak`/`sync_hz` are parsed by
+  `_analog_fingerprint()` and compared with tolerances by `_analog_fp_compatible()`
+  (never exact-match `fp` strings: two stations hearing one drone report the carrier a
+  fine-tune step apart and the line rate tens of Hz apart). A missing fingerprint never
+  splits. `_analog_record_observation()` must carry every key the solver uses into
+  `ANALOG_OBS`; `update_detection()` passing a key through to the UI does not reach
+  the solver. `hw`, `sectors`, `sector`, `field_hz`, `sync_q` are stored and
+  re-emitted untouched
+- A station with a live report near a cluster's frequency is never a silent station
+  for that cluster, even when its report was clustered elsewhere by fingerprint
+  (FM capture: it may hear this emitter under a stronger one)
 - The XIAO ESP32-C5 D4/D5 GPIO numbers are disputed: `remoteid-c5-5g` hardcodes
   GPIO6/GPIO7, the Arduino variant says GPIO23/GPIO24 (and calls GPIO6 the battery
   sense pin). If the variant is right, fielded C5 Level 2 nodes have a silent mesh

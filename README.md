@@ -684,15 +684,13 @@ over USB or via the home node from the mesh. **Keep this table and the
 | `receiver` | no (defaults to `rx5808`) | Log tag, popup, `basic_id` prefix (`5.8G` / `3.3G`) |
 | `rssi_dbm` | no, but needed for fixes | Calibrated received power. Ring radius (`_max_range_m`, FSPL at `freq_mhz`, assumed `DEFAULT_TX_DBM`), ring colour (green ≥ −60, amber ≥ −75, red below) and the multi-station solver. The mapper attaches `rssi_dbm` + `dbm_source` (`firmware`/`mapper`) to every analog detection it emits |
 | `rssi_mv`, `rssi_n`, `seq` | no | Popup / diagnostics |
-
-**Emitted by the station, not yet consumed here.** Level 1 v2 firmware also sends
-`hw`, `sectors`, `sector`, `bearing_deg`, `bearing_sigma_deg`, `freq_peak`,
-`video`, `sync_hz`, `field_hz`, `sync_q` and `fp`. `update_detection()` stores and
-re-emits them untouched, so they reach the UI and the API but change nothing.
-Teaching `_analog_solve()` to use `bearing_deg`/`bearing_sigma_deg` as a residual
-term — two bearings intersect with no transmitter-power assumption at all — and
-`fp` as a clustering key alongside frequency is the next change here.
 | `rssi_min`, `rssi_max` | no | Sample spread; the solver down-weights noisy reports |
+| `bearing_deg`, `bearing_sigma_deg` | no (Level 1 v2) | Bearing from true north and its 1σ. A residual term in `_analog_solve()` (`bearings=`), weighted by the station's own σ (floor `ANALOG_BEARING_SIGMA_MIN` = 5°, default `ANALOG_BEARING_SIGMA_DEG` = 15° when absent). Two stations with bearings produce a fix where two without cannot; on a multi-station RSSI fix they shrink the region |
+| `fp`, `video`, `freq_peak`, `sync_hz` | no (Level 1 v2) | Video fingerprint, `<NTSC\|PAL>/<line_hz>/<carrier MHz>`, parsed by `_analog_fingerprint()` (the separate keys fill gaps in a compact relay line). A second clustering key next to frequency: reports whose standards differ, or whose carrier centres are more than `ANALOG_FP_PEAK_MHZ` = 6 MHz apart, or whose line rates are more than `ANALOG_FP_LINE_HZ` = 500 Hz apart, are different emitters. Never compared exactly, never splits a report that has none. The standard and the carrier centre are what separate; the line rate cannot tell two NTSC cameras apart (all run 15734 Hz) and only guards against a wildly different sync train. `freq_peak` also replaces `freq_mhz` as the frequency a report clusters on. A station's last fingerprint is kept for reports of the same channel that arrive without one inside the fusion window |
+| `hw`, `sectors`, `sector`, `field_hz`, `sync_q` | no (Level 1 v2) | Popup / diagnostics; stored on the observation and re-emitted untouched |
+
+The v2 keys are optional everywhere: a v1 station, a compact relay line, or a v2
+report made without a video measurement still fuses with everything on its channel.
 
 The compact **mesh relay** copy of this line carries only `type`, `mac`,
 `freq_mhz`, `band`, `ch`, `rssi_raw`, `rssi_dbm`, `rssi_min`, `rssi_max`,
@@ -716,33 +714,58 @@ One station's RSSI cannot give a distance because the transmitter power is
 unknown; several stations can. `_analog_refresh_fixes()` runs after every analog
 detection:
 
-1. Live observations (≤ `ANALOG_FUSION_WINDOW_S` = 25 s old) are clustered by
-   frequency; reports within `ANALOG_CLUSTER_MHZ` = 20 MHz are one emitter, so two
-   stations peak-picking adjacent channels (R3 5732 / B1 5733) still fuse.
+1. Live observations (≤ `ANALOG_FUSION_WINDOW_S` = 25 s old) are grouped into
+   emitters by `_analog_cluster()`. Taken in frequency order (the fine-tuned
+   `freq_peak` when a station measured one, else the channel), a report joins the
+   nearest cluster it is compatible with, else starts one. Compatible means the
+   cluster's total width stays under `ANALOG_CLUSTER_MHZ` = 15 MHz **and** no
+   member's video fingerprint contradicts it. The width is a bound on the whole
+   cluster, never a neighbour-to-neighbour step: chaining merged every 20 MHz-spaced
+   channel of Band A, B or F into one emitter, so two drones on A1 and A2 became a
+   single fix placed between them. 15 MHz keeps every pair of neighbouring picks of
+   one carrier together (the 40-channel table's spacings are ≤ 14 MHz apart from four
+   20 MHz gaps at the band edges) and separates every distinct channel (≥ 19 MHz).
+   Two emitters on the *same* channel are only told apart by their fingerprints.
 2. For each cluster with ≥ 2 positioned stations, `_analog_solve()` grid-searches
    the emitter position under the log-distance model
    `p_i = P0 − 10·n·log10(d_i)` (`ANALOG_PATH_LOSS_EXP` = 2.3). `P0` has a
    closed form at every candidate, so the unknown TX power cancels. Every
    alive-but-silent positioned station adds a one-sided penalty ("predicted power
    here must be below `threshold_dbm` + `ANALOG_SILENT_MARGIN_DB`"), which is
-   what lets a dense field of nodes narrow a fix from only two positives. A
+   what lets a dense field of nodes narrow a fix from only two positives. A station
+   with a live report anywhere near the cluster's frequency is never counted silent,
+   even when its report was clustered elsewhere by fingerprint: it may be hearing this
+   emitter under a stronger one on the same channel, so it says nothing either way. A
    plausible VTX power prior (`ANALOG_TX_MIN/MAX_DBM`, 10 mW…5 W) bounds the
    "far away and very strong" family of solutions.
-3. Every coarse local minimum is refined (symmetric layouts have mirror
+3. Every v2 bearing is one more residual, `((bearing − bearing to candidate) / σ)²`,
+   alongside the RSSI terms. Two bearings intersect with no transmitter-power
+   assumption at all, so two stations that both report one produce a fix (two
+   without cannot); on a fix that already has several stations they shrink the
+   region (six stations, 6° bearing noise: ±243 m → ±133 m in the offline test).
+   At the four-sector DF's σ = 15° the 90 % wedge is ±32° wide, so a two-station
+   bearing fix only closes when the bearings differ by more than that.
+4. Every coarse local minimum is refined (symmetric layouts have mirror
    solutions); the 90 % region around the best point gives `err_m`, `bounded`,
    and `ambiguous` + `alt` when a second basin survives.
-4. Result: `ANALOG_FIXES[fix_id]` with `lat`, `lon`, `err_m`, `quality`
-   (`good` ≤ 300 m, `fair` ≤ 1000 m, else `poor`), `tx_dbm_est`, `nodes`,
-   `silent_nodes`, `macs`; participating detections get `fix_id`/`fix_lat`/
-   `fix_lon`/`fix_err_m`/`fix_quality`; `socketio` event `analog_fix`; CoT
-   `ANALOGFIX-…` marker + confidence circle (poor fixes are not sent).
+5. Result: `ANALOG_FIXES[fix_id]` with `lat`, `lon`, `err_m`, `quality`
+   (`good` ≤ 300 m, `fair` ≤ 1000 m, else `poor`), `tx_dbm_est`, `nodes` (each with
+   its `bearing_deg`, `bearing_sigma_deg`, `fp`), `silent_nodes`, `macs`, `fp`,
+   `video`, `freq_peak`, `n_bearings`, `bearing_rms_deg`; participating detections
+   get `fix_id`/`fix_lat`/`fix_lon`/`fix_err_m`/`fix_quality`; `socketio` event
+   `analog_fix`; CoT `ANALOGFIX-…` marker + confidence circle (poor fixes are not
+   sent). A fix keeps its id across refreshes through shared MACs; when two emitters
+   share a channel (so every MAC), the fingerprint and then the nearest previous
+   position decide which fix a cluster continues.
 
 The UI draws a 🎯 marker, a 90 % circle and spokes to the contributing stations
 for `good`/`fair` fixes (`updateAnalogFixes()` polls `/api/analog_fixes`), and a
 faint ❔ at the mirror solution when one cannot be excluded. Tune live with
 `POST /api/analog_fusion` (`path_loss_exp`, `sigma_db`, `silent_margin_db`,
-`window_s`, `cluster_mhz`). `mapper_test/analog_fusion_test.py` exercises the
-whole path offline.
+`window_s`, `cluster_mhz`, `fp_peak_mhz`, `fp_line_hz`).
+`mapper_test/analog_fusion_test.py` exercises the whole path offline, including the
+four band plans, two drones on adjacent Band A channels, two same-channel drones
+told apart by NTSC/PAL, and the two-station bearing fix.
 
 ### What appears in the UI
 
@@ -825,7 +848,7 @@ Differences from Level 2 (Remote ID) detections:
 | `GET/POST` | `/api/meshtastic_url` | Get or set Meshtastic HTTP API URL for a node |
 | `GET` | `/api/analog_fixes` | Multi-station analog FM position fixes (`fix_id` → lat/lon/err_m/quality/nodes) |
 | `GET` | `/api/analog_nodes` | Every Level 1 station heard: alive, threshold_dbm, temp, position |
-| `GET/POST` | `/api/analog_fusion` | Read or tune the solver (`path_loss_exp`, `sigma_db`, `silent_margin_db`, `window_s`, `cluster_mhz`) |
+| `GET/POST` | `/api/analog_fusion` | Read or tune the solver (`path_loss_exp`, `sigma_db`, `silent_margin_db`, `window_s`, `cluster_mhz`, `fp_peak_mhz`, `fp_line_hz`) |
 | `GET` | `/api/tak_contacts` | Current inbound ATAK/WinTAK/iTAK operator positions |
 
 ### **System Management**

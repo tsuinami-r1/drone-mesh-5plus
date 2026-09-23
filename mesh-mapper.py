@@ -357,7 +357,8 @@ def _analog_note_node(msg):
         st["last_seen"] = now
         if "heartbeat" in msg or "info" in msg:
             st["last_heartbeat"] = now
-        for k in ("threshold_dbm", "receiver", "temp_c", "uptime_s", "seq", "threshold"):
+        for k in ("threshold_dbm", "receiver", "temp_c", "uptime_s", "seq", "threshold",
+                  "hw", "heading", "video_seen"):
             if k in msg:
                 st[k] = msg[k]
         if "threshold_dbm" not in st and "threshold" in st:
@@ -377,7 +378,20 @@ def _analog_note_node(msg):
 # observations. The solver is a robust grid search: cheap, no linearisation,
 # and it yields a confidence region rather than a false-precise point.
 ANALOG_FUSION_WINDOW_S     = 25.0   # observations older than this leave the fix (mesh cadence is 10 s)
-ANALOG_CLUSTER_MHZ         = 20     # reports within this many MHz are one emitter (carrier is ~20 MHz wide)
+ANALOG_CLUSTER_MHZ         = 15     # one emitter's channel reports never span this many MHz (strict): a
+                                    #   bound on a cluster's width, never a chaining step. Two stations
+                                    #   peak-picking one carrier differ by at most the local channel spacing,
+                                    #   ≤ 14 MHz everywhere in the 40-channel table except four 20 MHz gaps
+                                    #   at the band edges; distinct channels are ≥ 19 MHz apart (Band B) and
+                                    #   nothing sits in 15–18, so 15 keeps every neighbour pick and splits
+                                    #   every real channel pair
+ANALOG_FP_PEAK_MHZ         = 6      # fine-tuned carrier centres (freq_peak, 2 MHz steps) this close are one emitter
+ANALOG_FP_LINE_HZ          = 500    # measured sync line rates this close are one emitter. Every NTSC camera runs
+                                    #   15734 Hz, so this field cannot tell two cameras apart; the count varies by
+                                    #   the sync separator's equalising pulses (up to ~500 Hz) and signal quality,
+                                    #   and the tolerance is only a guard against a wildly different train
+ANALOG_BEARING_SIGMA_DEG   = 15.0   # 1σ assumed for a bearing that arrives without bearing_sigma_deg
+ANALOG_BEARING_SIGMA_MIN   = 5.0    # floor on a reported σ: a four-sector amplitude comparison cannot do better
 ANALOG_PATH_LOSS_EXP       = 2.3    # log-distance exponent: 2.0 free space, 2.2–2.8 suburban clutter
 ANALOG_SIGMA_DB            = 6.0    # assumed per-observation error (fading, antenna pattern, calibration)
 ANALOG_NODE_ALIVE_S        = 300.0  # station heard within this counts as alive (mesh heartbeat is 120 s)
@@ -393,7 +407,8 @@ ANALOG_ERR_FAIR_M          = 1000.0
 ANALOG_FIX_STALE_S         = 60.0   # fix not refreshed for this long → inactive
 ANALOG_FIX_DROP_S          = 600.0
 
-ANALOG_OBS   = {}   # {mac: {node_id: {"dbm","t","freq_mhz","band","ch","spread_db","seq","basic_id"}}}
+ANALOG_OBS   = {}   # {mac: {node_id: {"dbm","t","freq_mhz","band","ch","spread_db","seq","basic_id",
+                    #                   "fp","fp_str","fp_t","bearing_deg","bearing_sigma_deg","sector","sync_q"}}}
 ANALOG_FIXES = {}   # {fix_id: {...}}  see _analog_refresh_fixes
 ANALOG_LOCK  = threading.Lock()
 _analog_fix_counter = 0
@@ -409,6 +424,109 @@ def _analog_unproject(x, y, lat0, lon0):
     lon = lon0 + x / (111320.0 * math.cos(math.radians(lat0)))
     return lat, lon
 
+def _analog_fingerprint(det):
+    """Video fingerprint of a Level 1 v2 report as {standard, line_hz, freq_peak}
+    (any subset), or None when the station measured nothing usable.
+
+    Parsed from `fp` ("NTSC/15736/5734": standard / measured sync line rate /
+    fine-tuned carrier MHz); the separate `video`, `sync_hz`, `freq_peak` keys
+    fill gaps so a compact relay line carrying only some of them still counts.
+    A `video` of "none" is not a standard: it says the station saw no sync
+    train, which a weak signal also does, so it never separates anything."""
+    std  = det.get("video")
+    line = det.get("sync_hz")
+    peak = det.get("freq_peak")
+    fp   = det.get("fp")
+    if isinstance(fp, str) and fp.count("/") == 2:
+        s, l, p = fp.split("/")
+        std  = std if std else s
+        line = line if line is not None else l
+        peak = peak if peak is not None else p
+    out = {}
+    if isinstance(std, str) and std.strip().upper() in ("NTSC", "PAL"):
+        out["standard"] = std.strip().upper()
+    for k, v in (("line_hz", line), ("freq_peak", peak)):
+        try:
+            v = float(v)
+            if math.isfinite(v) and v > 0:      # json.loads accepts NaN/Infinity: never let them in
+                out[k] = v
+        except (TypeError, ValueError):
+            pass
+    return out or None
+
+def _analog_fp_string(fp):
+    """`fp` as the station would have written it, for logs, TAK and the API;
+    a field the report did not carry shows as '?'."""
+    if not fp:
+        return None
+    return "/".join([fp.get("standard", "?"),
+                     str(int(fp["line_hz"])) if "line_hz" in fp else "?",
+                     str(int(fp["freq_peak"])) if "freq_peak" in fp else "?"])
+
+def _analog_fp_compatible(a, b):
+    """Could two fingerprints come from one emitter? A missing fingerprint or
+    a missing field never splits: legacy stations and reports made without
+    video must still fuse with everything on their channel. The values are
+    never compared exactly. Two stations hearing one drone report the carrier
+    centre a fine-tune step or two apart and the line rate tens of Hz apart
+    (it is a 200 ms edge count), so each field has its own tolerance."""
+    if not a or not b:
+        return True
+    if "standard" in a and "standard" in b and a["standard"] != b["standard"]:
+        return False
+    if ("freq_peak" in a and "freq_peak" in b
+            and abs(a["freq_peak"] - b["freq_peak"]) > ANALOG_FP_PEAK_MHZ):
+        return False
+    if ("line_hz" in a and "line_hz" in b
+            and abs(a["line_hz"] - b["line_hz"]) > ANALOG_FP_LINE_HZ):
+        return False
+    return True
+
+def _analog_obs_freq(o):
+    """Frequency an observation is clustered on: the fine-tuned carrier centre
+    when the station measured one, else the channel it peak-picked."""
+    fp = o.get("fp") or {}
+    try:
+        return float(fp.get("freq_peak") or o.get("freq_mhz") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+def _analog_cluster(live):
+    """Group live observations into emitters.
+
+    Taken in frequency order, each observation joins the nearest cluster it
+    is compatible with, else starts one. Compatible means the cluster would
+    still span less than ANALOG_CLUSTER_MHZ, and no member's video
+    fingerprint contradicts this one's (_analog_fp_compatible). The width is
+    a bound on the whole cluster, not a step between neighbours: chaining
+    neighbour-to-neighbour merged every 20 MHz-spaced channel of Band A, B
+    or F into a single emitter, so two drones on A1 and A2 became one fix
+    placed between them. Only a fingerprint can separate two emitters on the
+    same channel; legacy reports without one go to the nearest cluster.
+    Returns [{"obs": [...], "fmin", "fmax", "fps": [fingerprints]}]."""
+    clusters = []
+    for o in sorted(live, key=_analog_obs_freq):
+        f = _analog_obs_freq(o)
+        best = None
+        for cl in clusters:
+            if f - cl["fmin"] >= ANALOG_CLUSTER_MHZ:      # sorted input: fmin is the first member
+                continue
+            if not all(_analog_fp_compatible(o.get("fp"), x) for x in cl["fps"]):
+                continue
+            dist = abs(f - (cl["fmin"] + cl["fmax"]) / 2.0)
+            if best is None or dist < best[0]:
+                best = (dist, cl)
+        if best is None:
+            clusters.append({"obs": [o], "fmin": f, "fmax": f,
+                             "fps": [o["fp"]] if o.get("fp") else []})
+        else:
+            cl = best[1]
+            cl["obs"].append(o)
+            cl["fmax"] = max(cl["fmax"], f)
+            if o.get("fp"):
+                cl["fps"].append(o["fp"])
+    return clusters
+
 def _analog_record_observation(det):
     """Store the latest calibrated observation of this channel by this station."""
     mac, node_id = det.get("mac"), det.get("node_id")
@@ -421,26 +539,70 @@ def _analog_record_observation(det):
             spread_db = max(0.0, (float(det["rssi_max"]) - float(det["rssi_min"])) * _RX5808_DB_PER_COUNT)
     except (TypeError, ValueError):
         pass
+    now = time.time()
+    # v2 bearing: degrees from true north, with the station's own 1σ. A bad or
+    # missing σ keeps the bearing at the default σ; a bad bearing drops it.
+    bearing = None
+    bsigma = None
+    try:
+        bearing = float(det["bearing_deg"])
+        if not math.isfinite(bearing):
+            raise ValueError
+        bearing %= 360.0
+    except (KeyError, TypeError, ValueError):
+        bearing = None
+    if bearing is not None:
+        try:
+            bsigma = float(det.get("bearing_sigma_deg"))
+            if not math.isfinite(bsigma):
+                raise ValueError
+        except (TypeError, ValueError):
+            bsigma = ANALOG_BEARING_SIGMA_DEG
+        bsigma = max(ANALOG_BEARING_SIGMA_MIN, bsigma)
+    fp = _analog_fingerprint(det)
+    fp_str = (det.get("fp") if isinstance(det.get("fp"), str) else None) or _analog_fp_string(fp)
     obs = {
-        "dbm": float(dbm), "t": time.time(),
+        "dbm": float(dbm), "t": now,
         "freq_mhz": det.get("freq_mhz", 0), "band": det.get("band", "?"), "ch": det.get("ch", ""),
         "spread_db": round(spread_db, 1), "seq": det.get("seq"),
         "basic_id": det.get("basic_id", ""), "mac": mac, "node_id": node_id,
+        "fp": fp, "fp_str": fp_str if fp else None, "fp_t": now if fp else None,
+        "bearing_deg": bearing, "bearing_sigma_deg": bsigma,
+        "sector": det.get("sector"), "sync_q": det.get("sync_q"),
     }
     with ANALOG_LOCK:
+        prev = ANALOG_OBS.get(mac, {}).get(node_id)
+        # A v2 station fine-tunes and counts sync only on the strongest peaks
+        # of each sweep, so most reports of a carrier arrive without a
+        # fingerprint. Keep the last measured one while it is still inside the
+        # fusion window instead of forgetting it on every other report.
+        if fp is None and prev and prev.get("fp") and prev.get("fp_t") \
+                and now - prev["fp_t"] <= ANALOG_FUSION_WINDOW_S:
+            obs["fp"], obs["fp_str"], obs["fp_t"] = prev["fp"], prev.get("fp_str"), prev["fp_t"]
         ANALOG_OBS.setdefault(mac, {})[node_id] = obs
 
 def _analog_solve(obs, silent, n_exp=ANALOG_PATH_LOSS_EXP, sigma_db=ANALOG_SIGMA_DB,
-                  margin_db=ANALOG_SILENT_MARGIN_DB, grid_n=ANALOG_GRID_N, p0_range=None):
+                  margin_db=ANALOG_SILENT_MARGIN_DB, grid_n=ANALOG_GRID_N, p0_range=None,
+                  bearings=None):
     """Grid-search position solver.
 
     obs:      [(x, y, dbm, weight)]  stations that heard the emitter
     silent:   [(x, y, threshold_dbm)] alive stations that did not; each says
               the emitter's power there is below threshold + margin_db
+    bearings: [(x, y, deg, sigma_deg)] v2 stations' bearings to the emitter,
+              degrees clockwise from north (y axis). A bearing is a residual
+              like an RSSI reading, in units of its own σ; two of them fix a
+              position with no transmitter-power assumption at all, which is
+              why two stations with bearings solve while two without cannot
     p0_range: (min, max) plausible power at 1 m, from the VTX power prior
     Returns dict(x, y, p0_dbm, rms_db, err_m, bounded, cost, ...) or None.
     """
-    if len(obs) < 2 or len(obs) + len(silent) < 3:
+    # Normalise bearings once: wrap to [0, 360), floor σ so no caller can hand
+    # in a zero, drop anything non-finite
+    bearings = [(bx, by, bdeg % 360.0, max(ANALOG_BEARING_SIGMA_MIN, bsig))
+                for bx, by, bdeg, bsig in (bearings or [])
+                if math.isfinite(bdeg) and math.isfinite(bsig)]
+    if len(obs) < 2 or len(obs) + len(silent) + len(bearings) < 3:
         return None
     pts = [(o[0], o[1]) for o in obs] + [(s[0], s[1]) for s in silent]
     xs = [p[0] for p in pts]
@@ -452,9 +614,16 @@ def _analog_solve(obs, silent, n_exp=ANALOG_PATH_LOSS_EXP, sigma_db=ANALOG_SIGMA
     wsum = sum(o[3] for o in obs) or 1.0
     n_obs = len(obs)
 
+    sig2 = sigma_db * sigma_db
+
+    def total_of(sse, pen, bpen):
+        """One cost to minimise: dB² terms plus the bearing χ² scaled to dB²."""
+        return sse + pen + bpen * sig2
+
     def sse_at(x, y):
         """Weighted squared residual (dB²) at a candidate, with the closed-form
-        best P0, plus the silent-station penalty (dB²). Returns (sse, pen, p0)."""
+        best P0, the silent-station penalty (dB²), and the bearing residual as
+        a dimensionless χ² (Σ(Δθ/σθ)²). Returns (sse, pen, p0, bpen)."""
         num = 0.0
         losses = []
         for ox, oy, p, w in obs:
@@ -482,7 +651,12 @@ def _analog_solve(obs, silent, n_exp=ANALOG_PATH_LOSS_EXP, sigma_db=ANALOG_SIGMA
                 pen += (p0_range[0] - p0) ** 2
             elif p0 > p0_range[1]:
                 pen += (p0 - p0_range[1]) ** 2
-        return sse, pen, p0
+        bpen = 0.0
+        for bx, by, bdeg, bsig in bearings:
+            pred = math.degrees(math.atan2(x - bx, y - by)) % 360.0
+            dth = (bdeg - pred + 180.0) % 360.0 - 180.0        # wrapped to (-180, 180]
+            bpen += (dth / bsig) ** 2
+        return sse, pen, p0, bpen
 
     # Coarse grid over the whole search box
     n = max(5, int(grid_n))
@@ -494,9 +668,9 @@ def _analog_solve(obs, silent, n_exp=ANALOG_PATH_LOSS_EXP, sigma_db=ANALOG_SIGMA
         gx = x0 + i * dx
         for j in range(n):
             gy = y0 + j * dy
-            sse, pen, p0 = sse_at(gx, gy)
-            total[i][j] = sse + pen
-            cells[(i, j)] = (gx, gy, sse, pen, p0)
+            sse, pen, p0, bpen = sse_at(gx, gy)
+            total[i][j] = total_of(sse, pen, bpen)
+            cells[(i, j)] = (gx, gy, sse, pen, p0, bpen)
 
     # Every coarse local minimum is a candidate basin. Differential RSSI has
     # genuine mirror solutions for symmetric station layouts (two basins with
@@ -519,11 +693,11 @@ def _analog_solve(obs, silent, n_exp=ANALOG_PATH_LOSS_EXP, sigma_db=ANALOG_SIGMA
                 minima.append((c, i, j))
     minima.sort()
     fn = max(5, int(ANALOG_FINE_N))
-    best = None                      # (total, x, y, sse, pen, p0)
+    best = None                      # (total, x, y, sse, pen, p0, bpen)
     for c, i, j in minima[:6]:
         cx, cy = cells[(i, j)][0], cells[(i, j)][1]
         hx, hy = dx, dy
-        cand = (c, cx, cy, cells[(i, j)][2], cells[(i, j)][3], cells[(i, j)][4])
+        cand = (c, cx, cy) + cells[(i, j)][2:]
         for _ in range(2):           # two zoom levels: ±1 coarse cell, then ±1 fine cell
             fdx, fdy = 2 * hx / (fn - 1), 2 * hy / (fn - 1)
             bx, by = cand[1], cand[2]
@@ -531,9 +705,10 @@ def _analog_solve(obs, silent, n_exp=ANALOG_PATH_LOSS_EXP, sigma_db=ANALOG_SIGMA
                 gx = bx - hx + a * fdx
                 for b in range(fn):
                     gy = by - hy + b * fdy
-                    sse, pen, p0 = sse_at(gx, gy)
-                    if sse + pen < cand[0]:
-                        cand = (sse + pen, gx, gy, sse, pen, p0)
+                    sse, pen, p0, bpen = sse_at(gx, gy)
+                    t = total_of(sse, pen, bpen)
+                    if t < cand[0]:
+                        cand = (t, gx, gy, sse, pen, p0, bpen)
             hx, hy = fdx, fdy
         if best is None or cand[0] < best[0]:
             best = cand
@@ -546,11 +721,15 @@ def _analog_solve(obs, silent, n_exp=ANALOG_PATH_LOSS_EXP, sigma_db=ANALOG_SIGMA
     if n_obs >= 4:
         sigma_eff = max(3.0, min(sigma_db, rms * math.sqrt(n_obs / (n_obs - 3.0))))
 
-    # 90 % region from the coarse grid: every cell whose cost is within Δ of the
-    # best (in units of σ_eff²). Its extent is the reported error radius; if
-    # it touches the search boundary the solution is unbounded on that side.
-    limit = best[0] + ANALOG_REGION_DELTA * sigma_eff * sigma_eff
-    region = {ij for ij, c in cells.items() if c[2] + c[3] <= limit}
+    # 90 % region from the coarse grid: every cell whose χ² is within Δ of the
+    # best. RSSI terms are in units of σ_eff², bearing terms already in σθ².
+    # Its extent is the reported error radius; if it touches the search
+    # boundary the solution is unbounded on that side.
+    def chi2_of(sse, pen, bpen):
+        return (sse + pen) / (sigma_eff * sigma_eff) + bpen
+    best_chi2 = chi2_of(best[3], best[4], best[6])
+    limit = best_chi2 + ANALOG_REGION_DELTA
+    region = {ij for ij, c in cells.items() if chi2_of(c[2], c[3], c[5]) <= limit}
 
     # The region can be several islands: the basin holding the best point plus
     # a mirror basin that the data cannot rule out. The reported radius covers
@@ -584,14 +763,23 @@ def _analog_solve(obs, silent, n_exp=ANALOG_PATH_LOSS_EXP, sigma_db=ANALOG_SIGMA
     others = region - island
     alt = None
     if others:
-        oi = min(others, key=lambda ij: cells[ij][2] + cells[ij][3])
+        oi = min(others, key=lambda ij: total_of(cells[ij][2], cells[ij][3], cells[ij][5]))
         alt = {"x": cells[oi][0], "y": cells[oi][1],
-               "cost_excess_db2": round(cells[oi][2] + cells[oi][3] - best[0], 1)}
+               "cost_excess_db2": round(total_of(cells[oi][2], cells[oi][3], cells[oi][5]) - best[0], 1)}
 
     err = max(err, math.hypot(dx, dy) / 2.0)
+    brms = None
+    if bearings:
+        acc = 0.0
+        for bx, by, bdeg, _ in bearings:
+            pred = math.degrees(math.atan2(best[1] - bx, best[2] - by)) % 360.0
+            dth = (bdeg - pred + 180.0) % 360.0 - 180.0
+            acc += dth * dth
+        brms = math.sqrt(acc / len(bearings))
     return {"x": best[1], "y": best[2], "p0_dbm": best[5], "rms_db": rms,
-            "err_m": err, "bounded": bounded, "cost": best[0] / (sigma_eff * sigma_eff),
-            "sigma_eff_db": sigma_eff, "ambiguous": alt is not None, "alt": alt}
+            "err_m": err, "bounded": bounded, "cost": best_chi2,
+            "sigma_eff_db": sigma_eff, "ambiguous": alt is not None, "alt": alt,
+            "n_bearings": len(bearings), "bearing_rms_deg": brms}
 
 def _analog_refresh_fixes():
     """Cluster live observations into emitters, solve each, publish ANALOG_FIXES."""
@@ -615,18 +803,8 @@ def _analog_refresh_fixes():
     with NODE_STATUS_LOCK:
         status = {k: dict(v) for k, v in NODE_STATUS.items()}
 
-    # Cluster by frequency: chain observations whose freq_mhz are within
-    # ANALOG_CLUSTER_MHZ of each other (a carrier straddling two channels, or
-    # two stations peak-picking different neighbours, is one emitter).
-    live.sort(key=lambda o: float(o.get("freq_mhz") or 0))
-    clusters = []
-    for o in live:
-        f = float(o.get("freq_mhz") or 0)
-        if clusters and f - clusters[-1]["fmax"] <= ANALOG_CLUSTER_MHZ:
-            clusters[-1]["obs"].append(o)
-            clusters[-1]["fmax"] = f
-        else:
-            clusters.append({"obs": [o], "fmax": f})
+    # Cluster into emitters: bounded frequency width plus video fingerprint
+    clusters = _analog_cluster(live)
 
     new_fixes = {}
     for cl in clusters:
@@ -641,11 +819,24 @@ def _analog_refresh_fixes():
         if len(heard) < 2:
             continue
         strongest = max(heard, key=lambda o: o["dbm"])
+        # One fingerprint stands for the cluster: prefer one that names the
+        # video standard, since that is the field that separates hardest
+        fp_rep = next((x for x in cl["fps"] if "standard" in x), cl["fps"][0] if cl["fps"] else None)
+        fp_str = next((o.get("fp_str") for o in sorted(heard, key=lambda o: -o["dbm"]) if o.get("fp_str")), None)
 
-        # Silent-but-alive positioned stations
+        # Silent-but-alive positioned stations. A station with a live report
+        # anywhere near this cluster's frequency is not silent about it, even
+        # when the fingerprint put that report in another cluster: it may be
+        # hearing this emitter under a stronger one on the same channel (FM
+        # capture), so it says nothing either way and adds no constraint.
+        busy = set()
+        for o in live:
+            f = _analog_obs_freq(o)
+            if cl["fmin"] - ANALOG_CLUSTER_MHZ < f < cl["fmax"] + ANALOG_CLUSTER_MHZ:
+                busy.add(o["node_id"])
         silent_nodes = []
         for nid, st in status.items():
-            if nid in per_node or nid not in locs:
+            if nid in busy or nid not in locs:
                 continue
             if now - st.get("last_seen", 0) > ANALOG_NODE_ALIVE_S:
                 continue
@@ -658,12 +849,15 @@ def _analog_refresh_fixes():
         lat0 = sum(locs[o["node_id"]]["lat"] for o in heard) / len(heard)
         lon0 = sum(locs[o["node_id"]]["lon"] for o in heard) / len(heard)
         obs_xy = []
+        brg_xy = []
         for o in heard:
             x, y = _analog_project(locs[o["node_id"]]["lat"], locs[o["node_id"]]["lon"], lat0, lon0)
             age = now - o["t"]
             w = 1.0 / (1.0 + (o["spread_db"] / ANALOG_SIGMA_DB) ** 2)
             w *= math.exp(-age / ANALOG_FUSION_WINDOW_S)
             obs_xy.append((x, y, o["dbm"], w))
+            if o.get("bearing_deg") is not None:
+                brg_xy.append((x, y, o["bearing_deg"], o["bearing_sigma_deg"] or ANALOG_BEARING_SIGMA_DEG))
         sil_xy = []
         for nid, thr in silent_nodes:
             x, y = _analog_project(locs[nid]["lat"], locs[nid]["lon"], lat0, lon0)
@@ -671,8 +865,14 @@ def _analog_refresh_fixes():
 
         freq = strongest.get("freq_mhz", 0)
         fspl_c = _fspl_const_db(freq)
+        # The tunables are passed explicitly: _analog_solve's defaults were
+        # bound when it was defined, so /api/analog_fusion changes never
+        # reached it through them
         sol = _analog_solve(obs_xy, sil_xy,
-                            p0_range=(ANALOG_TX_MIN_DBM - fspl_c, ANALOG_TX_MAX_DBM - fspl_c))
+                            n_exp=ANALOG_PATH_LOSS_EXP, sigma_db=ANALOG_SIGMA_DB,
+                            margin_db=ANALOG_SILENT_MARGIN_DB,
+                            p0_range=(ANALOG_TX_MIN_DBM - fspl_c, ANALOG_TX_MAX_DBM - fspl_c),
+                            bearings=brg_xy)
         if sol is None:
             continue
         lat, lon = _analog_unproject(sol["x"], sol["y"], lat0, lon0)
@@ -686,13 +886,21 @@ def _analog_refresh_fixes():
         else:
             quality = "poor"
 
-        # Stable fix id: reuse any existing fix that shares a tracking key
+        # Stable fix id: reuse an existing fix that shares a tracking key. Two
+        # emitters on one channel share every MAC, so the fingerprint and then
+        # the nearest position decide which fix this cluster continues.
         fix_id = None
         with ANALOG_LOCK:
+            cands = []
             for fid, fx in ANALOG_FIXES.items():
-                if set(fx.get("macs", [])) & set(macs) and fid not in new_fixes:
-                    fix_id = fid
-                    break
+                if fid in new_fixes or not (set(fx.get("macs", [])) & set(macs)):
+                    continue
+                if not _analog_fp_compatible(fx.get("fingerprint"), fp_rep):
+                    continue
+                px, py = _analog_project(fx["lat"], fx["lon"], lat0, lon0)
+                cands.append((math.hypot(px - sol["x"], py - sol["y"]), fid))
+            if cands:
+                fix_id = min(cands)[1]
             if fix_id is None:
                 _analog_fix_counter += 1
                 fix_id = f"AFX-{int(float(freq))}-{_analog_fix_counter}"
@@ -713,10 +921,18 @@ def _analog_refresh_fixes():
             "path_loss_exp": ANALOG_PATH_LOSS_EXP,
             "freq_mhz": freq, "band": strongest.get("band", "?"), "ch": strongest.get("ch", ""),
             "basic_id": strongest.get("basic_id", ""), "macs": macs,
+            "fp": fp_str, "fingerprint": fp_rep,
+            "video": (fp_rep or {}).get("standard"), "freq_peak": (fp_rep or {}).get("freq_peak"),
             "n_nodes": len(heard), "n_silent": len(sil_xy),
+            "n_bearings": sol.get("n_bearings", 0),
+            "bearing_rms_deg": (round(sol["bearing_rms_deg"], 1)
+                                if sol.get("bearing_rms_deg") is not None else None),
             "nodes": [{"node_id": o["node_id"], "dbm": round(o["dbm"], 1),
                        "age_s": round(now - o["t"]), "mac": o["mac"],
-                       "lat": locs[o["node_id"]]["lat"], "lon": locs[o["node_id"]]["lon"]}
+                       "lat": locs[o["node_id"]]["lat"], "lon": locs[o["node_id"]]["lon"],
+                       "bearing_deg": o.get("bearing_deg"),
+                       "bearing_sigma_deg": o.get("bearing_sigma_deg"),
+                       "fp": o.get("fp_str")}
                       for o in sorted(heard, key=lambda o: -o["dbm"])],
             "silent_nodes": [nid for nid, _ in silent_nodes],
             "last_update": now, "status": "active",
@@ -735,16 +951,24 @@ def _analog_refresh_fixes():
             elif age > ANALOG_FIX_STALE_S:
                 fx["status"] = "inactive"
 
-    # Annotate participating detections and publish
+    # Annotate participating detections and publish. tracked_pairs holds one
+    # line per MAC (whichever station reported last); when two fixes share a
+    # MAC, the line carries the fix that its own station contributed to.
+    fixes_by_mac = {}
     for fid, fx in new_fixes.items():
         for mac in fx["macs"]:
-            det = tracked_pairs.get(mac)
-            if det is not None and det.get("type") == "analog_fm":
-                det["fix_id"] = fid
-                det["fix_lat"] = fx["lat"]
-                det["fix_lon"] = fx["lon"]
-                det["fix_err_m"] = fx["err_m"]
-                det["fix_quality"] = fx["quality"]
+            fixes_by_mac.setdefault(mac, []).append(fx)
+    for mac, fxs in fixes_by_mac.items():
+        det = tracked_pairs.get(mac)
+        if det is None or det.get("type") != "analog_fm":
+            continue
+        fx = next((f for f in fxs if any(n["node_id"] == det.get("node_id") for n in f["nodes"])), fxs[0])
+        det["fix_id"] = fx["fix_id"]
+        det["fix_lat"] = fx["lat"]
+        det["fix_lon"] = fx["lon"]
+        det["fix_err_m"] = fx["err_m"]
+        det["fix_quality"] = fx["quality"]
+    for fid, fx in new_fixes.items():
         try:
             socketio.emit('analog_fix', fx, )
         except Exception:
@@ -753,6 +977,7 @@ def _analog_refresh_fixes():
         logger.info(
             f"[analog fix] {fx['basic_id']} @ {fx['lat']:.5f},{fx['lon']:.5f} "
             f"±{fx['err_m']} m ({fx['quality']}) nodes={fx['n_nodes']} silent={fx['n_silent']} "
+            f"bearings={fx['n_bearings']} fp={fx['fp'] or '-'} "
             f"tx≈{fx['tx_dbm_est']} dBm rms={fx['rms_db']} dB"
         )
 
@@ -956,8 +1181,9 @@ def _tak_enqueue_fix(fix):
     callsign = f"FIX {fix.get('basic_id') or fid}"
     remarks  = (f"Analog FM fix from {fix.get('n_nodes')} stations "
                 f"({', '.join(n['node_id'] for n in fix.get('nodes', []))}), "
-                f"{fix.get('n_silent')} silent; ±{fix.get('err_m')} m; "
-                f"TX≈{fix.get('tx_dbm_est')} dBm; rms {fix.get('rms_db')} dB")
+                f"{fix.get('n_silent')} silent, {fix.get('n_bearings') or 0} bearings; "
+                f"±{fix.get('err_m')} m; TX≈{fix.get('tx_dbm_est')} dBm; rms {fix.get('rms_db')} dB"
+                + (f"; video {fix['fp']}" if fix.get('fp') else ""))
     try:
         _tak_queue.put_nowait(_cot_event(
             uid=f"ANALOGFIX-{fid}",
@@ -5630,9 +5856,10 @@ def api_analog_nodes():
 @app.route('/api/analog_fusion', methods=['GET', 'POST'])
 def api_analog_fusion():
     """GET: current solver tuning. POST: override any of path_loss_exp,
-    sigma_db, silent_margin_db, window_s, cluster_mhz at runtime."""
+    sigma_db, silent_margin_db, window_s, cluster_mhz, fp_peak_mhz,
+    fp_line_hz at runtime."""
     global ANALOG_PATH_LOSS_EXP, ANALOG_SIGMA_DB, ANALOG_SILENT_MARGIN_DB
-    global ANALOG_FUSION_WINDOW_S, ANALOG_CLUSTER_MHZ
+    global ANALOG_FUSION_WINDOW_S, ANALOG_CLUSTER_MHZ, ANALOG_FP_PEAK_MHZ, ANALOG_FP_LINE_HZ
     if request.method == 'POST':
         data = request.get_json(force=True) or {}
         try:
@@ -5645,16 +5872,23 @@ def api_analog_fusion():
             if 'window_s' in data:
                 ANALOG_FUSION_WINDOW_S = max(5.0, min(300.0, float(data['window_s'])))
             if 'cluster_mhz' in data:
-                ANALOG_CLUSTER_MHZ = max(0, min(100, int(data['cluster_mhz'])))
+                # 1 MHz minimum: at 0 nothing could ever share a cluster
+                ANALOG_CLUSTER_MHZ = max(1, min(100, int(data['cluster_mhz'])))
+            if 'fp_peak_mhz' in data:
+                ANALOG_FP_PEAK_MHZ = max(1, min(50, int(data['fp_peak_mhz'])))
+            if 'fp_line_hz' in data:
+                ANALOG_FP_LINE_HZ = max(0, min(2000, int(data['fp_line_hz'])))
         except (TypeError, ValueError) as exc:
             return jsonify({'error': str(exc)}), 400
         logger.info(f"Analog fusion tuning updated: n={ANALOG_PATH_LOSS_EXP} σ={ANALOG_SIGMA_DB} "
                     f"margin={ANALOG_SILENT_MARGIN_DB} window={ANALOG_FUSION_WINDOW_S} "
-                    f"cluster={ANALOG_CLUSTER_MHZ}")
+                    f"cluster={ANALOG_CLUSTER_MHZ} fp_peak={ANALOG_FP_PEAK_MHZ} "
+                    f"fp_line={ANALOG_FP_LINE_HZ}")
     return jsonify({
         'path_loss_exp': ANALOG_PATH_LOSS_EXP, 'sigma_db': ANALOG_SIGMA_DB,
         'silent_margin_db': ANALOG_SILENT_MARGIN_DB, 'window_s': ANALOG_FUSION_WINDOW_S,
-        'cluster_mhz': ANALOG_CLUSTER_MHZ, 'node_alive_s': ANALOG_NODE_ALIVE_S,
+        'cluster_mhz': ANALOG_CLUSTER_MHZ, 'fp_peak_mhz': ANALOG_FP_PEAK_MHZ,
+        'fp_line_hz': ANALOG_FP_LINE_HZ, 'node_alive_s': ANALOG_NODE_ALIVE_S,
     })
 
 @app.route('/api/tak_contacts', methods=['GET'])
