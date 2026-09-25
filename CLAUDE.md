@@ -13,6 +13,11 @@ This branch holds **Level 1 station firmware only**, two designs side by side:
 `mesh-mapper.py`, the Level 2 (Wi-Fi/BLE Remote ID) firmware and the home node
 live on `main` and must not be copied here.
 
+**Current Level 1 focus: C5-based 5.8 GHz development**, i.e. the v3 station on this
+branch. v2 stays the design to field until v3 passes bench validation. The RX3364
+(3.3 GHz) receiver is **shelved**: don't start RX3364 work
+(`docs/RX3364-INTEGRATION-PLAN.md` is kept for reference only).
+
 ## Pre-commit checklist (required before every commit)
 
 1. `cd level1-c5phy && pio run -e seeed_xiao_esp32c5` must succeed with no warnings
@@ -118,4 +123,5 @@ is per-pin; the video classifier decides PAL/NTSC by field rate.
   `mac`/`drone_lat`/`pilot_lat`/`basic_id`/`remote_id`; they carry `node_id` and
   `threshold_dbm`. Bench console output uses `"info":"bench..."` for that reason
 - `PEAK_PICK` reports only the strongest of adjacent channels; the mapper also
-  clusters reports within 20 MHz
+  groups reports into emitters by frequency (a cluster never spans 15 MHz) and by
+  video fingerprint
