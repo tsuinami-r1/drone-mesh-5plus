@@ -44,8 +44,6 @@
 
 - `mesh-mapper.py`: Flask + SocketIO server; detection flow is
   `serial_reader` → `update_detection()` → `socketio.emit` → browser JS
-- `_skip_faa` is an internal routing flag; it must be `.pop()`-ed at the top of
-  `update_detection()` and must never appear in emitted JSON
 - `NODE_LOCATIONS` and `MESHTASTIC_URLS` share `NODE_LOCATIONS_LOCK`
 - Analog FM detections (type == "analog_fm") come from Level 1 stations, have no
   drone/pilot GPS, and render as range rings + 📡 markers via `analogFmRings` /

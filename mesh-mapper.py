@@ -1089,13 +1089,11 @@ def _tak_enqueue(detection):
         if not (lat and lon):
             return
         radius_m = detection.get("radius_m")
-        band     = detection.get("band", "?")
-        ch       = detection.get("ch", "?")
         freq     = detection.get("freq_mhz", "?")
         rssi     = detection.get("rssi_raw", detection.get("rssi", "?"))
         dbm      = detection.get("rssi_dbm", "?")
         node_id  = detection.get("node_id", "?")
-        callsign = detection.get("basic_id") or f"5.8G-{band}{ch}-{freq}MHz"
+        callsign = detection.get("basic_id") or _analog_basic_id(detection)
         remarks  = f"Analog FM {freq}MHz RSSI={rssi} ({dbm} dBm) node={node_id}"
         if detection.get("fix_id"):
             remarks += f" fix={detection['fix_id']} ±{detection.get('fix_err_m', '?')}m"
@@ -1839,10 +1837,6 @@ def update_detection(detection):
     if not mac:
         return
 
-    # Extract and remove internal routing flags before the detection
-    # is stored or emitted — they must not appear in frontend JSON.
-    skip_faa = detection.pop('_skip_faa', False)
-
     # Retrieve new drone coordinates from the detection
     new_drone_lat = detection.get("drone_lat", 0)
     new_drone_long = detection.get("drone_long", 0)
@@ -2387,7 +2381,7 @@ PORT_SELECTION_PAGE = '''
       </button>
     </div>
     <div style="margin-top:12px; margin-bottom:4px; text-align:center; border-top:1px solid #333; padding-top:10px;">
-      <label style="font-size:16px; font-family:'Orbitron', monospace; color:#87CEEB;">RX5808 Node Location</label><br>
+      <label style="font-size:16px; font-family:'Orbitron', monospace; color:#87CEEB;">Level 1 Station Location</label><br>
       <small style="color:#888; font-family:monospace; font-size:11px;">Meshtastic URL (auto-fetch GPS) or manual lat/lon</small><br><br>
       <input type="text" id="nodeLocNodeId" placeholder="Node ID (e.g. RX01)"
              style="font-family:monospace; color:#87CEEB; background-color:#222; border:1px solid #FF00FF; width:48%; font-size:13px; padding:4px; box-sizing:border-box;">
@@ -2564,7 +2558,7 @@ PORT_SELECTION_PAGE = '''
       }
     });
 
-    // ---- RX5808 node location helpers ----
+    // ---- Level 1 station location helpers ----
     function setNodeMeshtasticUrl() {
       const nodeId = document.getElementById('nodeLocNodeId').value.trim();
       const url    = document.getElementById('nodeLocMeshtasticUrl').value.trim();
@@ -2606,7 +2600,7 @@ PORT_SELECTION_PAGE = '''
       })
       .catch(e => { status.textContent = 'Request failed: ' + e; status.style.color='#ff4422'; });
     }
-    // ---- end RX5808 helpers ----
+    // ---- end Level 1 station location helpers ----
 
     // Ensure webhook URL is included when Begin Mapping form is submitted
     document.getElementById('beginMapping').addEventListener('click', function(e) {
@@ -4034,8 +4028,8 @@ const droneMarkers = {};
 const pilotMarkers = {};
 const droneCircles = {};
 const pilotCircles = {};
-const analogFmRings = {};    // L.circle range rings for RX5808 analog FM detections
-const analogFmMarkers = {};  // node-position markers for RX5808 detections
+const analogFmRings = {};    // L.circle range rings for Level 1 analog FM detections
+const analogFmMarkers = {};  // station-position markers for Level 1 detections
 const takContactMarkers = {}; // ATAK/WinTAK/iTAK operator position markers
 window.tak_contacts = {};
 const dronePolylines = {};
@@ -5247,7 +5241,7 @@ def serial_reader(port):
                         logger.debug(f"Skipping non-detection message from {port}: {detection}")
                         continue
 
-                    # Level 1 analog FM detection — log prominently, skip FAA lookup
+                    # Level 1 analog FM detection — log prominently
                     if detection.get('type') == 'analog_fm':
                         logger.info(
                             f"[{detection.get('receiver', 'analog')}] Analog FM signal: "
@@ -5257,7 +5251,6 @@ def serial_reader(port):
                             f"dBm={detection.get('rssi_dbm','?')} "
                             f"node={detection.get('node_id','?')} port={port}"
                         )
-                        detection['_skip_faa'] = True
 
                     # Normalize remote_id field
                     if 'remote_id' in detection and 'basic_id' not in detection:
@@ -5540,7 +5533,7 @@ def main():
     # Start cleanup timer to prevent memory leaks
     start_cleanup_timer()
 
-    # Start Meshtastic position poller for RX5808 analog FM range rings
+    # Start Meshtastic position poller for Level 1 station positions (rings and fixes)
     threading.Thread(target=_meshtastic_poller, daemon=True,
                      name="MeshtasticPoller").start()
     if TAK_ENABLE:
@@ -5773,7 +5766,7 @@ def api_webhook_url():
     return jsonify({"webhook_url": WEBHOOK_URL or ""})
 
 # ============================================================
-# RX5808 Node Location & Meshtastic URL API
+# Level 1 Station Location & Meshtastic URL API
 # ============================================================
 
 @app.route('/api/node_location', methods=['GET', 'POST'])

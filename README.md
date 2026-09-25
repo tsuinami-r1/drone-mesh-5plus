@@ -674,7 +674,7 @@ over USB or via the home node from the mesh. **Keep this table and the
 
 | Key | Required | Mapper use |
 |-----|----------|------------|
-| `type` | yes, must be `"analog_fm"` | Routes the line around every Remote ID code path: no FAA lookup (`_skip_faa`), no drone/pilot markers, not appended to `detection_history`, 30 s stale timeout in `cleanup_old_detections()`, `ANALOGFM-` sensor marker + range-ring CoT events |
+| `type` | yes, must be `"analog_fm"` | Routes the line around every Remote ID code path: never raises the no-GPS drone popup or webhook (`isNoGpsDrone` guards), no drone/pilot markers, not appended to `detection_history`, 30 s stale timeout in `cleanup_old_detections()`, `ANALOGFM-` sensor marker + range-ring CoT events |
 | `mac` | yes | Tracking key. Synthetic, locally-administered `AF:00:` prefix + frequency (big-endian MHz) + band ASCII + channel, so every channel is its own "device" and never collides with a real Wi-Fi MAC |
 | `node_id` | yes | Looks up the station position in `NODE_LOCATIONS` and draws the ring there; keys the station's liveness in `NODE_STATUS`. Must equal the paired Meshtastic node's shortName/longName |
 | `freq_mhz`, `band`, `ch` | yes | Popup, log line, CoT callsign, frequency-derived path-loss constant, emitter clustering (`ANALOG_CLUSTER_MHZ`) |
