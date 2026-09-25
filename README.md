@@ -53,7 +53,7 @@ stations, so six cheap boxes beat two clever ones.
 | **Level 1 v3 prototype** *(this branch)* | Analog FPV **video carriers**, 5.8 GHz, on the **C5's own radio**. Power per sector, bearing, software video check | **`level1-c5phy`** |
 | Level 1 v2 | Same job on an **RX5808 + sync separator**; XIAO S3 or C5 | [`level1-station`](https://github.com/tsuinami-r1/drone-mesh-5plus/tree/level1-station) (also kept here in `level1-analog-fpv/`) |
 | Level 2 | Digital **Remote ID / DJI DroneID / MAVLink** over Wi-Fi and BLE. Decodes drone and pilot GPS | [`main`](https://github.com/tsuinami-r1/drone-mesh-5plus) |
-| Collection point | `mesh-mapper.py`, the home node bridge, TAK output, Raspberry Pi installer | [`main`](https://github.com/tsuinami-r1/drone-mesh-5plus) |
+| Collection point | `mesh-mapper.py`, the home node bridge, Raspberry Pi installer | [`main`](https://github.com/tsuinami-r1/drone-mesh-5plus) |
 
 All tiers share the same Heltec/Meshtastic backhaul and the same **D4/D5** UART
 wiring. They meet only at the mapper, through the [JSON line contract](#-mapper-contract),
@@ -661,7 +661,7 @@ diagnostic keys that the mapper stores and ignores.
   "type":     "analog_fm",
   "receiver": "c5phy",
   "hw":       "v3",
-  "mac":      "AF:00:16:6C:52:03",
+  "mac":      "AF:00:16:64:52:03",
   "freq_mhz": 5732,
   "band":     "R",
   "ch":       3,
@@ -713,12 +713,12 @@ diagnostic keys that the mapper stores and ignores.
 Byte-for-byte the v2 format, at most every `MESH_REPORT_INTERVAL_MS`:
 
 ```json
-{"type":"analog_fm","mac":"AF:00:16:6C:52:03","freq_mhz":5732,"band":"R","ch":3,"rssi_dbm":-68.1,"bearing_deg":32,"bearing_sigma_deg":15,"fp":"NTSC/15736/5734","node_id":"RX01","seq":42}
+{"type":"analog_fm","mac":"AF:00:16:64:52:03","freq_mhz":5732,"band":"R","ch":3,"rssi_dbm":-68.1,"bearing_deg":32,"bearing_sigma_deg":15,"fp":"NTSC/15736/5734","node_id":"RX01","seq":42}
 ```
 
 It **must be JSON** and **must stay under 200 bytes**; the firmware drops the
 fingerprint, then the bearing, rather than ever truncating. The mapper backfills
-`rssi`, `basic_id` and `receiver` (as `rx5808`, a label only).
+`basic_id` and `receiver` (as `rx5808`, a label only).
 
 ### Heartbeat and info lines
 
@@ -736,9 +736,10 @@ is the v2 subset: `node_id`, `receiver`, `hw`, `heading`, `threshold_dbm`,
 
 ### What the mapper does with several stations
 
-Unchanged: reports from two or more positioned stations within 20 MHz and the
-fusion window are solved for position and transmitter power, silent-but-alive
-stations constrain it, fixes go to ATAK/WinTAK. `GET /api/analog_fixes`,
+Unchanged from v2: reports of one emitter from two or more positioned stations
+(grouped by frequency, never across a 15 MHz span, and by video fingerprint) inside
+the fusion window are solved for position and transmitter power; every reported
+bearing and every silent-but-alive station constrains the fix. `GET /api/analog_fixes`,
 `GET /api/analog_nodes`, `GET/POST /api/analog_fusion` on `main`.
 
 ---
@@ -765,9 +766,9 @@ through, v2 is the design to field.
 |---|---|---|
 | **Bench validation of v3** | The six checks above, PAL included; sensitivity against an RX5808 | 📋 Blocks everything else on this branch |
 | **v3 carrier PCB** | XIAO C5 footprint, SP4T with four U.FL launches, UART header, nothing else | 📋 After validation |
-| **Mapper consumes v2/v3 keys** (`main`) | Bearing residuals in the solver; `fp` as a second clustering key | 📋 Next `main` change |
+| **Mapper consumes v2/v3 keys** (`main`) | Bearing residuals in the solver; `fp` as a second clustering key | ✅ On `main` since PR #19 |
 | **Field rate on v3** | Timed captures across a field to measure `field_hz` instead of inferring it | 📋 Nice to have |
-| **[RX3364 3.3 GHz](docs/RX3364-INTEGRATION-PLAN.md)** | Long-range analog on 3.3 GHz — the C5's radio cannot reach it, so this stays a v2-style module | 📋 Blocked on gate 0 |
+| **[RX3364 3.3 GHz](docs/RX3364-INTEGRATION-PLAN.md)** | Long-range analog on 3.3 GHz — the C5's radio cannot reach it, so this stays a v2-style module | ⏸️ Shelved: Level 1 development is focused on C5-based 5.8 GHz (this branch) |
 
 ---
 

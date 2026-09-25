@@ -306,8 +306,8 @@ C5 figure is an estimate from the C5 datasheet's receive current; measure it.
   antenna, so the SP4T feeds it directly; confirm on the first board that no
   on-board antenna switch needs a GPIO to select the external path (the Arduino
   variant defines none).
-- **3.3 GHz.** The C5's radio does not reach it; the RX3364 plan stays a
-  v2-style module.
+- **3.3 GHz.** The C5's radio does not reach it. The RX3364 plan (a v2-style
+  module) is shelved while development focuses on 5.8 GHz on the C5.
 
 ## 7. Bench log
 
