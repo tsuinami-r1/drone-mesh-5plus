@@ -432,7 +432,7 @@ python3 mesh-mapper.py --web-port 8080 --no-tak # custom port, no CoT output
 
 **What you get:** a live Leaflet map with drone and pilot markers and trails,
 persistent detections across restarts, a no-GPS panel for detections without a fix,
-device aliases, FAA registration lookup for Remote ID serials, CSV / KML / GeoJSON
+device aliases, CSV / KML / GeoJSON
 export, a cumulative detection log, webhook callbacks, and a Cursor-on-Target feed
 that ATAK / WinTAK / iTAK pick up over multicast. Runtime output lands in
 `mapper.log`, `cumulative_detections.csv`, `cumulative.kml` and per-session
@@ -678,11 +678,11 @@ over USB or via the home node from the mesh. **Keep this table and the
 | `mac` | yes | Tracking key. Synthetic, locally-administered `AF:00:` prefix + frequency (big-endian MHz) + band ASCII + channel, so every channel is its own "device" and never collides with a real Wi-Fi MAC |
 | `node_id` | yes | Looks up the station position in `NODE_LOCATIONS` and draws the ring there; keys the station's liveness in `NODE_STATUS`. Must equal the paired Meshtastic node's shortName/longName |
 | `freq_mhz`, `band`, `ch` | yes | Popup, log line, CoT callsign, frequency-derived path-loss constant, emitter clustering (`ANALOG_CLUSTER_MHZ`) |
-| `rssi_raw` | yes | Raw ADC count. Only the fallback for `rssi_dbm` (`_rssi_raw_to_dbm`, RX5808 curve: 0–1320 counts ≈ −95…−20 dBm) and for ring colour |
+| `rssi_raw` | if no `rssi_dbm` (v2 sends it on USB only) | Raw ADC count. Only the fallback for `rssi_dbm` (`_rssi_raw_to_dbm`, RX5808 curve: 0–1320 counts ≈ −95…−20 dBm) |
 | `rssi` | no (backfilled from `rssi_raw`) | Generic RSSI display shared with Level 2 detections, CSV |
 | `basic_id` | no (backfilled from `receiver`/band/ch/freq) | Human-readable label, CoT callsign |
 | `receiver` | no (defaults to `rx5808`) | Log tag, popup, `basic_id` prefix (`5.8G` / `3.3G`) |
-| `rssi_dbm` | no, but needed for fixes | Calibrated received power. Ring radius (`_max_range_m`, FSPL at `freq_mhz`, assumed `DEFAULT_TX_DBM`), ring colour (green ≥ −60, amber ≥ −75, red below) and the multi-station solver. The mapper attaches `rssi_dbm` + `dbm_source` (`firmware`/`mapper`) to every analog detection it emits |
+| `rssi_dbm` | if no `rssi_raw` (v2 always sends it) | Calibrated received power. Ring radius (`_max_range_m`, FSPL at `freq_mhz`, assumed `DEFAULT_TX_DBM`), ring colour (green ≥ −60, amber ≥ −75, red below) and the multi-station solver. The mapper attaches `rssi_dbm` + `dbm_source` (`firmware`/`mapper`) to every analog detection it emits |
 | `rssi_mv`, `rssi_n`, `seq` | no | Popup / diagnostics |
 | `rssi_min`, `rssi_max` | no | Sample spread; the solver down-weights noisy reports |
 | `bearing_deg`, `bearing_sigma_deg` | no (Level 1 v2) | Bearing from true north and its 1σ. A residual term in `_analog_solve()` (`bearings=`), weighted by the station's own σ (floor `ANALOG_BEARING_SIGMA_MIN` = 5°, default `ANALOG_BEARING_SIGMA_DEG` = 15° when absent). Two stations with bearings produce a fix where two without cannot; on a multi-station RSSI fix they shrink the region |
@@ -692,20 +692,33 @@ over USB or via the home node from the mesh. **Keep this table and the
 The v2 keys are optional everywhere: a v1 station, a compact relay line, or a v2
 report made without a video measurement still fuses with everything on its channel.
 
-The compact **mesh relay** copy of this line carries only `type`, `mac`,
-`freq_mhz`, `band`, `ch`, `rssi_raw`, `rssi_dbm`, `rssi_min`, `rssi_max`,
-`node_id`, `seq` (≤ 190 bytes for the LoRa payload); the home node forwards
-Level 1 JSON without MAC dedup, and `_analog_normalise()` backfills the rest. A
-detection carrying only the pre-`rssi_dbm` keys must keep rendering a ring.
+The compact **mesh relay** copy of a v2 line carries `type`, `mac`, `freq_mhz`,
+`band`, `ch`, `rssi_dbm`, then `bearing_deg` + `bearing_sigma_deg` and, when video
+was measured, `fp` or `"video":"none"`, then `node_id`, `seq`. It carries no
+`rssi_raw`, `rssi_min` or `rssi_max`, so the ring and the solver run on `rssi_dbm`.
+The station keeps it within 200 bytes by dropping the fingerprint, then the bearing,
+never by truncating:
+
+```json
+{"type":"analog_fm","mac":"AF:00:16:64:52:03","freq_mhz":5732,"band":"R","ch":3,"rssi_dbm":-68.1,"bearing_deg":32,"bearing_sigma_deg":15,"fp":"NTSC/15736/5734","node_id":"RX01","seq":42}
+```
+
+The v1 relay line (`type`, `mac`, `freq_mhz`, `band`, `ch`, `rssi_raw`, `rssi_dbm`,
+`rssi_min`, `rssi_max`, `node_id`, `seq`) is still accepted. The home node forwards
+Level 1 JSON without MAC dedup, and `_analog_normalise()` backfills `basic_id` and
+`receiver` (plus `rssi` on lines that carry `rssi_raw`). A detection carrying only
+the pre-`rssi_dbm` keys must keep rendering a ring.
 
 Status lines carrying `heartbeat`, `status` or `info` and none of the detection keys
-are dropped by the serial reader and never create a device. Level 1 heartbeats are
-first recorded in `NODE_STATUS` (`_analog_note_node`): `node_id`, `threshold_dbm`,
-`receiver`, `temp_c`, `uptime_s`. A station with a heartbeat or detection within
+are dropped by the serial reader and never create a device. A Level 1 heartbeat or
+`info` line that names a `node_id` is first recorded in `NODE_STATUS`
+(`_analog_note_node`): `threshold_dbm` (derived from the raw `threshold` for
+pre-`rssi_dbm` firmware), `receiver`, `hw`, `heading`, `video_seen`, `temp_c`,
+`uptime_s`, `seq`. A station with a heartbeat or detection within
 `ANALOG_NODE_ALIVE_S` (300 s) is *alive*.
 
 ```json
-{"heartbeat":true,"node_id":"RX01","receiver":"rx5808","scanning":true,"channels":40,"threshold":600,"threshold_dbm":-94.5,"temp_c":41.2,"uptime_s":3600,"seq":42}
+{"heartbeat":true,"node_id":"RX01","receiver":"rx5808","hw":"v2","scanning":true,"channels":40,"sectors":4,"heading":0,"threshold":600,"threshold_dbm":-94.5,"video_seen":7,"temp_c":41.2,"uptime_s":3600,"seq":42}
 ```
 
 ### Multi-station fixes (differential-RSSI multilateration)

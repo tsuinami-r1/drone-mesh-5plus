@@ -20,7 +20,7 @@
 2. Review changed C++ for: correct board conditional coverage (S3 **and** C5 paths),
    correct GPIO numbers, no hardcoded array sizes that should use a `#define` constant
 3. Check that any new detection type cannot bleed into OpenDroneID-specific code paths
-   (popup logic, FAA lookup, isNoGpsDrone, etc.)
+   (popup logic, the no-GPS webhook, isNoGpsDrone, etc.)
 4. If the mapper's handling of `analog_fm` detections changed, confirm a detection
    carrying only the keys in the Level 1 contract still renders a ring (Level 1
    stations in the field are not reflashed when the mapper updates) and run
