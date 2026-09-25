@@ -11,7 +11,7 @@
 
 Real-time Remote ID, DJI DroneID, MAVLink & analog-FPV mapping over a Meshtastic-linked mesh of unattended ESP32 nodes
 
-Branch `main`: **Level 2 stations** (Wi-Fi/BLE Remote ID) and the `mesh-mapper.py` collection point. **Level 1 stations** (analog FPV receivers) live on branch [`level1-station`](https://github.com/tsuinami-r1/drone-mesh-5plus/tree/level1-station).
+Branch `main`: **Level 2 stations** (Wi-Fi/BLE Remote ID) and the `mesh-mapper.py` collection point. **Level 1 stations** (analog FPV receivers) live on branches [`level1-station`](https://github.com/tsuinami-r1/drone-mesh-5plus/tree/level1-station) (v2, RX5808) and [`level1-c5phy`](https://github.com/tsuinami-r1/drone-mesh-5plus/tree/level1-c5phy) (v3 prototype: the XIAO ESP32-C5's own radio is the receiver).
 
 [🏗️ Station tiers](#️-station-tiers) • [🚀 Quick Start](#-quick-start) • [📦 Firmware](#-firmware-variants) • [🔧 Hardware](#-hardware-setup) • [🛠️ API Reference](#️-api-reference)
 
@@ -37,11 +37,11 @@ upstream Remote ID mapper it adds:
   with hit-triggered dwell, instead of a fixed channel
 - **XIAO ESP32-C5 dual-band** support, built on the [pioarduino](https://github.com/pioarduino/platform-espressif32)
   platform (Arduino-ESP32 core 3.x)
-- **Level 1 analog FPV stations** (RX5808 today, RX3364 planned, on the
-  `level1-station` branch) feeding the same mapper: one station draws a range ring,
+- **Level 1 analog FPV stations** (RX5808 on the `level1-station` branch; a station
+  whose receiver is the XIAO ESP32-C5's own radio is in development on `level1-c5phy`)
+  feeding the same mapper: one station draws a range ring,
   and **two or more produce a position fix** by solving for the emitter's location
   and its unknown transmitter power from the differences between what they heard
-- **TAK / ATAK / WinTAK** Cursor-on-Target output and inbound operator positions
 - Unattended-operation hardening: watchdog resets, serial reconnect loops, bounded
   over-the-air parsers, per-drone mesh rate limiting, and filtering so serial-side
   noise can never be broadcast onto the mesh
@@ -78,7 +78,7 @@ picture of who is flying and from where, without ever tipping them off.
   over-the-air parsers, per-node mesh rate-limiting).
 - **One collection point.** A single machine (a laptop or Raspberry Pi) runs
   `mesh-mapper.py`, ingests the mesh via a paired "home" node on USB, and serves the
-  live map, detection history, and TAK/ATAK feed. Only this endpoint needs an operator;
+  live map and detection history. Only this endpoint needs an operator;
   everything upstream is autonomous.
 
 **Scale:** a multi-node, city-wide mesh running a mix of XIAO ESP32-S3 and ESP32-C5
@@ -94,9 +94,9 @@ branches and meet only at the collection point, where both feed the same
 
 | Tier | What it listens for | Hardware | Branch |
 |------|---------------------|----------|--------|
-| **Level 1** | Analog FPV **video carriers**: 5.8 GHz today (RX5808), 3.3 GHz planned (RX3364). Calibrated signal strength per sector, a bearing from four sector antennas, and a video-sync check. One station draws a ring and a bearing; several produce a position fix. | XIAO ESP32-S3 or C5 + RX5808 + SP4T switch + 4 patches + sync separator + Heltec V3 | [`level1-station`](https://github.com/tsuinami-r1/drone-mesh-5plus/tree/level1-station) |
+| **Level 1** | Analog FPV **video carriers** at 5.8 GHz. Calibrated signal strength per sector, a bearing from four sector antennas, and a video-sync check. One station draws a ring and a bearing; several produce a position fix. | XIAO ESP32-S3 or C5 + RX5808 + SP4T switch + 4 patches + sync separator + Heltec V3 (v2); XIAO ESP32-C5 as its own receiver + SP4T + 4 patches + Heltec V3 (v3 prototype) | [`level1-station`](https://github.com/tsuinami-r1/drone-mesh-5plus/tree/level1-station) (v2), [`level1-c5phy`](https://github.com/tsuinami-r1/drone-mesh-5plus/tree/level1-c5phy) (v3) |
 | **Level 2** | Digital **Remote ID / DJI DroneID / MAVLink** over Wi-Fi and BLE. Decodes drone and pilot GPS. | XIAO ESP32-S3 or C5 + Heltec V3 | **`main`** (this branch) |
-| Collection point | `mesh-mapper.py`, the home node bridge, TAK output, Raspberry Pi installer | Laptop / Raspberry Pi + XIAO S3 `home_node` + Heltec V3 | **`main`** (this branch) |
+| Collection point | `mesh-mapper.py`, the home node bridge, Raspberry Pi installer | Laptop / Raspberry Pi + XIAO S3 `home_node` + Heltec V3 | **`main`** (this branch) |
 
 **Branch rules**
 
@@ -121,7 +121,7 @@ branches and meet only at the collection point, where both feed the same
 | **DJI DroneID** | **802.11 beacon (IE 221)** | **`26:37:12`** | **All variants** |
 | DJI OcuSync / O3 / O4 | OFDM (~2.4295 GHz video band) | — | ❌ Requires SDR |
 | **MAVLink GPS** | **802.11 data frame (UDP/14550)** | **any MAC** | **All variants** |
-| **Analog FPV video** | **5.645–5.945 GHz FM** (3.3 GHz planned) | **synthetic `AF:00:…` MAC** | **Level 1 stations, branch `level1-station`** |
+| **Analog FPV video** | **5.645–5.945 GHz FM** | **synthetic `AF:00:…` MAC** | **Level 1 stations, branches `level1-station` / `level1-c5phy`** |
 
 > **DJI Wi-Fi coverage caveat:** Modern DJI aircraft (Mini 3 Pro, Air 3, Mavic 3 series) primarily use OcuSync/O3/O4 for their DroneID downlink, which is OFDM in the video band and **cannot be demodulated by an ESP32**. The Wi-Fi IE221 DroneID broadcast (`26:37:12`) is present on older and budget models; treat it as partial fleet coverage, not "all DJI".
 
@@ -420,21 +420,21 @@ python3 mesh-mapper.py [OPTIONS]
 | `--web-port PORT` | Web interface port | 5000 |
 | `--port-interval SECONDS` | Serial port monitoring interval | 10 |
 | `--no-auto-start` | Disable automatic connection to remembered ports | false |
-| `--no-tak` | Disable TAK/ATAK CoT multicast output and receiver | false |
-| `--tak-addr ADDR` | TAK multicast address | 239.2.3.1 |
-| `--tak-port PORT` | TAK multicast port | 6969 |
+
+TAK / Cursor-on-Target output has been removed for now and will be re-implemented
+later. `--no-tak`, `--tak-addr` and `--tak-port` are still accepted and ignored, so
+existing launch commands keep working.
 
 ```bash
-python3 mesh-mapper.py                          # web UI on :5000, TAK multicast on
+python3 mesh-mapper.py                          # web UI on :5000
 python3 mesh-mapper.py --headless --debug       # dedicated collection point, verbose log
-python3 mesh-mapper.py --web-port 8080 --no-tak # custom port, no CoT output
+python3 mesh-mapper.py --web-port 8080          # custom port
 ```
 
 **What you get:** a live Leaflet map with drone and pilot markers and trails,
 persistent detections across restarts, a no-GPS panel for detections without a fix,
-device aliases, FAA registration lookup for Remote ID serials, CSV / KML / GeoJSON
-export, a cumulative detection log, webhook callbacks, and a Cursor-on-Target feed
-that ATAK / WinTAK / iTAK pick up over multicast. Runtime output lands in
+device aliases, CSV / KML / GeoJSON
+export, a cumulative detection log and webhook callbacks. Runtime output lands in
 `mapper.log`, `cumulative_detections.csv`, `cumulative.kml` and per-session
 `detections_*.csv|kml` files next to the script (all git-ignored).
 
@@ -622,8 +622,8 @@ revisit intervals.
 
 ## 📡 **Level 1 stations (analog FPV)**
 
-Level 1 stations detect **analog FPV video carriers** (5.645–5.945 GHz today via the
-RX5808; 3.3 GHz via the RX3364 is planned) and report calibrated received power per
+Level 1 stations detect **analog FPV video carriers** (5.645–5.945 GHz, through an
+RX5808 on the v2 station or the XIAO ESP32-C5's own radio on the v3 prototype) and report calibrated received power per
 channel, a **bearing** from four sector antennas behind an RF switch, and a
 **video-sync check** that separates a real analog video carrier from Wi-Fi or noise
 and fingerprints it as PAL or NTSC. They carry no drone or pilot GPS, so a single station gets a **range ring**
@@ -649,7 +649,7 @@ This section documents only the mapper side of the interface.
 
 `mesh-mapper.py` accepts these JSON lines from a Level 1 station, whether they arrive
 over USB or via the home node from the mesh. **Keep this table and the
-`level1-station` README in step.**
+`level1-station` and `level1-c5phy` READMEs in step.**
 
 ```json
 {
@@ -674,15 +674,15 @@ over USB or via the home node from the mesh. **Keep this table and the
 
 | Key | Required | Mapper use |
 |-----|----------|------------|
-| `type` | yes, must be `"analog_fm"` | Routes the line around every Remote ID code path: no FAA lookup (`_skip_faa`), no drone/pilot markers, not appended to `detection_history`, 30 s stale timeout in `cleanup_old_detections()`, `ANALOGFM-` sensor marker + range-ring CoT events |
+| `type` | yes, must be `"analog_fm"` | Routes the line around every Remote ID code path: never raises the no-GPS drone popup or webhook (`isNoGpsDrone` guards), no drone/pilot markers, not appended to `detection_history`, 30 s stale timeout in `cleanup_old_detections()` |
 | `mac` | yes | Tracking key. Synthetic, locally-administered `AF:00:` prefix + frequency (big-endian MHz) + band ASCII + channel, so every channel is its own "device" and never collides with a real Wi-Fi MAC |
 | `node_id` | yes | Looks up the station position in `NODE_LOCATIONS` and draws the ring there; keys the station's liveness in `NODE_STATUS`. Must equal the paired Meshtastic node's shortName/longName |
-| `freq_mhz`, `band`, `ch` | yes | Popup, log line, CoT callsign, frequency-derived path-loss constant, emitter clustering (`ANALOG_CLUSTER_MHZ`) |
-| `rssi_raw` | yes | Raw ADC count. Only the fallback for `rssi_dbm` (`_rssi_raw_to_dbm`, RX5808 curve: 0–1320 counts ≈ −95…−20 dBm) and for ring colour |
+| `freq_mhz`, `band`, `ch` | yes | Popup, log line, frequency-derived path-loss constant, emitter clustering (`ANALOG_CLUSTER_MHZ`) |
+| `rssi_raw` | if no `rssi_dbm` (v2 sends it on USB only) | Raw ADC count. Only the fallback for `rssi_dbm` (`_rssi_raw_to_dbm`, RX5808 curve: 0–1320 counts ≈ −95…−20 dBm) |
 | `rssi` | no (backfilled from `rssi_raw`) | Generic RSSI display shared with Level 2 detections, CSV |
-| `basic_id` | no (backfilled from `receiver`/band/ch/freq) | Human-readable label, CoT callsign |
+| `basic_id` | no (backfilled from `receiver`/band/ch/freq) | Human-readable label |
 | `receiver` | no (defaults to `rx5808`) | Log tag, popup, `basic_id` prefix (`5.8G` / `3.3G`) |
-| `rssi_dbm` | no, but needed for fixes | Calibrated received power. Ring radius (`_max_range_m`, FSPL at `freq_mhz`, assumed `DEFAULT_TX_DBM`), ring colour (green ≥ −60, amber ≥ −75, red below) and the multi-station solver. The mapper attaches `rssi_dbm` + `dbm_source` (`firmware`/`mapper`) to every analog detection it emits |
+| `rssi_dbm` | if no `rssi_raw` (v2 always sends it) | Calibrated received power. Ring radius (`_max_range_m`, FSPL at `freq_mhz`, assumed `DEFAULT_TX_DBM`), ring colour (green ≥ −60, amber ≥ −75, red below) and the multi-station solver. The mapper attaches `rssi_dbm` + `dbm_source` (`firmware`/`mapper`) to every analog detection it emits |
 | `rssi_mv`, `rssi_n`, `seq` | no | Popup / diagnostics |
 | `rssi_min`, `rssi_max` | no | Sample spread; the solver down-weights noisy reports |
 | `bearing_deg`, `bearing_sigma_deg` | no (Level 1 v2) | Bearing from true north and its 1σ. A residual term in `_analog_solve()` (`bearings=`), weighted by the station's own σ (floor `ANALOG_BEARING_SIGMA_MIN` = 5°, default `ANALOG_BEARING_SIGMA_DEG` = 15° when absent). Two stations with bearings produce a fix where two without cannot; on a multi-station RSSI fix they shrink the region |
@@ -692,20 +692,33 @@ over USB or via the home node from the mesh. **Keep this table and the
 The v2 keys are optional everywhere: a v1 station, a compact relay line, or a v2
 report made without a video measurement still fuses with everything on its channel.
 
-The compact **mesh relay** copy of this line carries only `type`, `mac`,
-`freq_mhz`, `band`, `ch`, `rssi_raw`, `rssi_dbm`, `rssi_min`, `rssi_max`,
-`node_id`, `seq` (≤ 190 bytes for the LoRa payload); the home node forwards
-Level 1 JSON without MAC dedup, and `_analog_normalise()` backfills the rest. A
-detection carrying only the pre-`rssi_dbm` keys must keep rendering a ring.
+The compact **mesh relay** copy of a v2 line carries `type`, `mac`, `freq_mhz`,
+`band`, `ch`, `rssi_dbm`, then `bearing_deg` + `bearing_sigma_deg` and, when video
+was measured, `fp` or `"video":"none"`, then `node_id`, `seq`. It carries no
+`rssi_raw`, `rssi_min` or `rssi_max`, so the ring and the solver run on `rssi_dbm`.
+The station keeps it within 200 bytes by dropping the fingerprint, then the bearing,
+never by truncating:
+
+```json
+{"type":"analog_fm","mac":"AF:00:16:64:52:03","freq_mhz":5732,"band":"R","ch":3,"rssi_dbm":-68.1,"bearing_deg":32,"bearing_sigma_deg":15,"fp":"NTSC/15736/5734","node_id":"RX01","seq":42}
+```
+
+The v1 relay line (`type`, `mac`, `freq_mhz`, `band`, `ch`, `rssi_raw`, `rssi_dbm`,
+`rssi_min`, `rssi_max`, `node_id`, `seq`) is still accepted. The home node forwards
+Level 1 JSON without MAC dedup, and `_analog_normalise()` backfills `basic_id` and
+`receiver` (plus `rssi` on lines that carry `rssi_raw`). A detection carrying only
+the pre-`rssi_dbm` keys must keep rendering a ring.
 
 Status lines carrying `heartbeat`, `status` or `info` and none of the detection keys
-are dropped by the serial reader and never create a device. Level 1 heartbeats are
-first recorded in `NODE_STATUS` (`_analog_note_node`): `node_id`, `threshold_dbm`,
-`receiver`, `temp_c`, `uptime_s`. A station with a heartbeat or detection within
+are dropped by the serial reader and never create a device. A Level 1 heartbeat or
+`info` line that names a `node_id` is first recorded in `NODE_STATUS`
+(`_analog_note_node`): `threshold_dbm` (derived from the raw `threshold` for
+pre-`rssi_dbm` firmware), `receiver`, `hw`, `heading`, `video_seen`, `temp_c`,
+`uptime_s`, `seq`. A station with a heartbeat or detection within
 `ANALOG_NODE_ALIVE_S` (300 s) is *alive*.
 
 ```json
-{"heartbeat":true,"node_id":"RX01","receiver":"rx5808","scanning":true,"channels":40,"threshold":600,"threshold_dbm":-94.5,"temp_c":41.2,"uptime_s":3600,"seq":42}
+{"heartbeat":true,"node_id":"RX01","receiver":"rx5808","hw":"v2","scanning":true,"channels":40,"sectors":4,"heading":0,"threshold":600,"threshold_dbm":-94.5,"video_seen":7,"temp_c":41.2,"uptime_s":3600,"seq":42}
 ```
 
 ### Multi-station fixes (differential-RSSI multilateration)
@@ -753,8 +766,7 @@ detection:
    its `bearing_deg`, `bearing_sigma_deg`, `fp`), `silent_nodes`, `macs`, `fp`,
    `video`, `freq_peak`, `n_bearings`, `bearing_rms_deg`; participating detections
    get `fix_id`/`fix_lat`/`fix_lon`/`fix_err_m`/`fix_quality`; `socketio` event
-   `analog_fix`; CoT `ANALOGFIX-…` marker + confidence circle (poor fixes are not
-   sent). A fix keeps its id across refreshes through shared MACs; when two emitters
+   `analog_fix`. A fix keeps its id across refreshes through shared MACs; when two emitters
    share a channel (so every MAC), the fingerprint and then the nearest previous
    position decide which fix a cluster continues.
 
@@ -793,7 +805,6 @@ POST /api/node_location  { "node_id": "RX01", "lat": 25.7617, "lon": -80.1918 }
 Differences from Level 2 (Remote ID) detections:
 - `type: "analog_fm"` is logged at INFO level with band/channel/RSSI/dBm.
 - Range rings are colored by received power: green ≥ −60 dBm, amber ≥ −75 dBm, red below (raw-count thresholds 1000/800 only when no dBm is available).
-- Each detection is also forwarded to ATAK/WinTAK as two CoT events: an `a-u-G-E-S` sensor marker and a `u-r-b-c-c` range ring shape; multi-station fixes add an `a-u-A-M-F-U-M` marker and a confidence circle.
 - A station silent for 30 s is marked inactive (Level 2 detections get 3 min).
 
 ---
@@ -840,7 +851,7 @@ Differences from Level 2 (Remote ID) detections:
 | `GET` | `/download/cumulative_detections.csv` | Download full history (CSV) |
 | `GET` | `/download/cumulative.kml` | Download full history (KML) |
 
-### **Level 1 station / TAK Integration**
+### **Level 1 stations**
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
@@ -849,7 +860,6 @@ Differences from Level 2 (Remote ID) detections:
 | `GET` | `/api/analog_fixes` | Multi-station analog FM position fixes (`fix_id` → lat/lon/err_m/quality/nodes) |
 | `GET` | `/api/analog_nodes` | Every Level 1 station heard: alive, threshold_dbm, temp, position |
 | `GET/POST` | `/api/analog_fusion` | Read or tune the solver (`path_loss_exp`, `sigma_db`, `silent_margin_db`, `window_s`, `cluster_mhz`, `fp_peak_mhz`, `fp_line_hz`) |
-| `GET` | `/api/tak_contacts` | Current inbound ATAK/WinTAK/iTAK operator positions |
 
 ### **System Management**
 
@@ -871,7 +881,6 @@ Real-time events pushed to connected clients:
 - `serial_status` - ESP32 connection status changes
 - `aliases` - Device alias updates
 - `cumulative_log` - Historical data updates
-- `tak_contact` - Inbound ATAK/WinTAK/iTAK operator position (lat/lon/callsign/type)
 
 ---
 

@@ -39,7 +39,9 @@
 // ============================================================================
 // The same physical D4/D5 header pins on both boards, so the existing S3
 // carrier PCBs fit a C5 unchanged. The GPIO numbers behind those labels differ
-// per board (matches the Level 1 station firmware on the level1-station branch).
+// per board. The C5 pair below is disputed: the Arduino XIAO_ESP32C5 variant,
+// which the Level 1 station firmware follows, maps D4/D5 to GPIO23/GPIO24. See
+// the warning under "Wiring for mesh integration" in README.md before changing it.
 
 #if defined(CONFIG_IDF_TARGET_ESP32C5) || defined(ARDUINO_XIAO_ESP32C5)
   const int SERIAL1_TX_PIN = 6;   // D4 on XIAO ESP32-C5 → Heltec RX
