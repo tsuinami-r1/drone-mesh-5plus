@@ -4,14 +4,20 @@
 
 - **`main` (this branch)**: Level 2 stations (Wi-Fi/BLE Remote ID, DJI DroneID,
   MAVLink firmware), the home node bridge, and the **only copy of `mesh-mapper.py`**
-- **`level1-station`**: Level 1 stations (analog FPV receivers: `level1-analog-fpv/`,
-  RX5808 today, RX3364 planned). Firmware only; it never carries the mapper. The
-  station is the v2 design: four sector patches behind an SP4T switch (bearing) and a
-  video sync separator (video check + fingerprint)
+- **`level1-station`**: Level 1 v2 stations (analog FPV: `level1-analog-fpv/`, RX5808
+  receiver). Firmware only; it never carries the mapper. The station is the v2
+  design: four sector patches behind an SP4T switch (bearing) and a video sync
+  separator (video check + fingerprint)
+- **`level1-c5phy`**: the Level 1 v3 prototype, where the XIAO ESP32-C5's own 5 GHz
+  radio is the receiver (no RX5808, C5-only), plus a copy of the v2 firmware.
+  Firmware only
+- **Current Level 1 focus: C5-based 5.8 GHz development** (`level1-c5phy`). The
+  RX3364 (3.3 GHz) receiver is shelved: don't start RX3364 work or shape mapper
+  changes around it unless it is revived
 - Both tiers feed `mesh-mapper.py`. The Level 1 side of that interface is the
   "Level 1 station contract" table in README.md; a change to the keys the mapper
   reads from `type == "analog_fm"` detections must be mirrored in the
-  `level1-station` README and firmware in the same change set
+  `level1-station` and `level1-c5phy` READMEs and firmware in the same change set
 - Never re-add Level 1 firmware here; never copy `mesh-mapper.py` there
 
 ## Pre-commit checklist (required before every commit)
@@ -58,7 +64,7 @@
   (`_analog_cluster()`: width-bounded frequency clustering + video fingerprint;
   `_analog_solve()` grid search with closed-form TX power, silent-station penalties,
   bearing residuals, mirror-basin detection) → `ANALOG_FIXES`, `analog_fix` socket
-  event, `/api/analog_fixes`, `_tak_enqueue_fix()`. `NODE_STATUS` (own lock) holds
+  event, `/api/analog_fixes`. `NODE_STATUS` (own lock) holds
   liveness + `threshold_dbm` from heartbeats; the serial reader must call
   `_analog_note_node()` on a Level 1 heartbeat *before* dropping it
 - Clustering is a bound on a cluster's total width (`ANALOG_CLUSTER_MHZ`, strict),
@@ -89,3 +95,11 @@
 - Run `python3 mapper_test/analog_fusion_test.py` after touching anything analog
 - Home node (`node-mode-dualcore/src/main_home.cpp`) forwards `"analog_fm"` lines
   without MAC dedup: several stations legitimately report the same synthetic MAC
+- TAK / Cursor-on-Target output and the inbound TAK contact display were removed on
+  purpose (largely unused) and will be re-implemented as a whole once the product is
+  more complete. Don't add TAK code back piecemeal in the meantime. The previous
+  implementation (`_cot_event`, `_tak_enqueue*`, `_tak_sender`, `_process_cot`,
+  `_tak_receiver`, `/api/tak_contacts`) is in git history (`git log -S _tak_enqueue`);
+  if reusing it, note its self-echo filter `_TAK_OWN_PREFIXES` missed the
+  `ANALOGFIX-` UIDs. `--no-tak`/`--tak-addr`/`--tak-port` are still accepted and
+  ignored so old launch commands start
