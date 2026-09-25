@@ -34,7 +34,6 @@ def load_mapper():
     spec = importlib.util.spec_from_file_location("mesh_mapper_under_test", dst)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
-    mod.TAK_ENABLE = False
     return mod
 
 
