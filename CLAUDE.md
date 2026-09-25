@@ -1,12 +1,16 @@
 # drone-mesh-5plus / `level1-station` — Claude Code Instructions
 
-This branch holds **Level 1 station firmware only** (analog FPV receivers: RX5808
-today, RX3364 planned). `mesh-mapper.py`, the Level 2 (Wi-Fi/BLE Remote ID)
-firmware and the home node live on `main` and must not be copied here.
+This branch holds **Level 1 station firmware only** (analog FPV receiver: the RX5808).
+`mesh-mapper.py`, the Level 2 (Wi-Fi/BLE Remote ID) firmware and the home node live
+on `main` and must not be copied here.
 
 The station is the **v2 design**: four sector patches behind an SP4T switch
 (bearing), a sync separator on the receiver's video output (video check +
 fingerprint), one RX5808. There is no omni-antenna "v1" build any more.
+
+**Current Level 1 focus: C5-based 5.8 GHz development** on the `level1-c5phy` branch
+(v3: the XIAO ESP32-C5's own radio is the receiver). This v2 design stays the fielded
+station. The RX3364 (3.3 GHz) receiver is **shelved**: don't start RX3364 work.
 
 ## Pre-commit checklist (required before every commit)
 
@@ -72,7 +76,8 @@ fingerprint), one RX5808. There is no omni-antenna "v1" build any more.
   Raw counts are not comparable between an S3 and a C5
 - v2 keys `sectors`, `sector`, `bearing_deg`, `bearing_sigma_deg`, `freq_peak`,
   `video`, `sync_hz`, `field_hz`, `sync_q`, `fp` are additive. The mapper on `main`
-  ignores them today; teaching the solver bearings and `fp` is the next `main` change
+  uses them: the bearing is a residual in its position solver, and `fp` (with
+  `video`/`freq_peak`/`sync_hz`) is a second clustering key, compared with tolerances
 - **Mesh line length budget**: `MESH_LINE_MAX` = 200 bytes. The compact detection
   line carries type/mac/freq/band/ch/rssi_dbm + bearing pair + (`fp` or
   `"video":"none"`) + node_id/seq, worst case 191 bytes with a 4-char `NODE_ID`.
@@ -87,7 +92,8 @@ fingerprint), one RX5808. There is no omni-antenna "v1" build any more.
   station as alive and uses silence as a "not within range" constraint. USB and mesh
   heartbeats have different key sets (mesh is the subset the mapper stores)
 - `PEAK_PICK` reports only the strongest of adjacent channels so one VTX is one
-  tracking key per station; the mapper additionally clusters reports within 20 MHz
+  tracking key per station; the mapper additionally groups reports into emitters by
+  frequency (a cluster never spans 15 MHz) and by video fingerprint
 
 ## Firmware layout (`level1-analog-fpv/`)
 
@@ -96,8 +102,8 @@ fingerprint), one RX5808. There is no omni-antenna "v1" build any more.
   the `VIDEO_MAX_PER_SWEEP` strongest due peaks, JSON, relay, heartbeat. Receiver-agnostic:
   refers only to `RX_*` names
 - `analog_receiver.h` — the interface; `-DRECEIVER_RX5808` in `platformio.ini` selects
-  `receivers/rx5808.*`. New receivers (RX3364) go behind this seam per
-  `docs/RX3364-INTEGRATION-PLAN.md`; do not fork `main.cpp` per receiver
+  `receivers/rx5808.*`. Any new receiver goes behind this seam; do not fork
+  `main.cpp` per receiver
 - `sector_switch.*` — `SECTOR_SWITCH_TABLE` drives V1/V2/V3; `SECTOR_AZIMUTHS`
 - `bearing.*` — strongest sector + `BEARING_DEG_PER_DB × (right − left)`, sigma widened
   for weak peaks, noise-floor neighbours, rear sector within 3 dB
@@ -115,8 +121,11 @@ fingerprint), one RX5808. There is no omni-antenna "v1" build any more.
   (eFuse-calibrated, for dBm); JSON is built with `snprintf`, no ArduinoJson
 - Mesh relay lines are `\n`-terminated only (no CR) and written as one burst
 
-## RX3364 work
+## RX3364 (shelved)
 
-- Follow `docs/RX3364-INTEGRATION-PLAN.md`; gate 0 (bench characterisation of the
-  tuning interface and RSSI curve) must be recorded there before driver code lands
-- The `analog_receiver.h` seam and `receivers/` layout the plan describes already exist
+- Shelved while Level 1 development focuses on C5-based 5.8 GHz: don't start RX3364
+  driver, hardware or mapper work. `docs/RX3364-INTEGRATION-PLAN.md` is kept for
+  reference only; if the idea is revived, its gate 0 (bench characterisation of the
+  tuning interface and RSSI curve) still comes before any driver code
+- The `RECEIVER_RX3364` branch in `analog_receiver.h` is only a compile-time `#error`
+  guard; leave it

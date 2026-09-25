@@ -50,9 +50,9 @@ stations, so six cheap boxes beat two clever ones.
 
 | Tier | Listens for | Branch |
 |------|-------------|--------|
-| **Level 1** *(this branch)* | Analog FPV **video carriers** — 5.8 GHz now, 3.3 GHz planned. Signal strength per sector, bearing, video fingerprint. | **`level1-station`** |
+| **Level 1** *(this branch)* | Analog FPV **video carriers** at 5.8 GHz. Signal strength per sector, bearing, video fingerprint. | **`level1-station`** (v2); v3 C5-radio prototype: [`level1-c5phy`](https://github.com/tsuinami-r1/drone-mesh-5plus/tree/level1-c5phy) |
 | **Level 2** | Digital **Remote ID / DJI DroneID / MAVLink** over Wi-Fi and BLE. Decodes drone and pilot GPS. | [`main`](https://github.com/tsuinami-r1/drone-mesh-5plus) |
-| Collection point | `mesh-mapper.py`, the home node bridge, TAK output, Raspberry Pi installer | [`main`](https://github.com/tsuinami-r1/drone-mesh-5plus) |
+| Collection point | `mesh-mapper.py`, the home node bridge, Raspberry Pi installer | [`main`](https://github.com/tsuinami-r1/drone-mesh-5plus) |
 
 Both tiers share the same Heltec/Meshtastic backhaul and the same D4/D5 UART
 wiring. They meet only at the mapper, through the [JSON line contract](#-mapper-contract).
@@ -385,9 +385,9 @@ these lines, over USB or through the home node from the mesh.
 > the `main` commit. Stations in the field are not reflashed when the mapper
 > updates, so the mapper keeps accepting older keys.
 >
-> **Status:** the mapper on `main` consumes everything through `seq` below and
-> ignores the v2 keys (`sectors` … `fp`) safely. Teaching the solver to use
-> bearings and the fingerprint is the next `main` change — see [Roadmap](#️-roadmap).
+> **Status:** the mapper on `main` consumes every key below. The bearing is a
+> residual in its position solver and `fp` a second clustering key; `hw`,
+> `sectors`, `sector`, `field_hz` and `sync_q` are stored and passed through.
 
 ### Detection line (USB)
 
@@ -399,7 +399,7 @@ of adjacent channels, and `REPORT_INTERVAL_MS` has elapsed:
   "type":     "analog_fm",
   "receiver": "rx5808",
   "hw":       "v2",
-  "mac":      "AF:00:16:6C:52:03",
+  "mac":      "AF:00:16:64:52:03",
   "freq_mhz": 5732,
   "band":     "R",
   "ch":       3,
@@ -428,19 +428,19 @@ of adjacent channels, and `REPORT_INTERVAL_MS` has elapsed:
 
 | Key | Present | What the mapper does with it |
 |-----|---------|------------------------------|
-| `type` | **always**, literal `"analog_fm"` | Routes the line around every Remote ID path: no FAA lookup, no drone/pilot markers, 30 s stale timeout, sensor + range-ring CoT events |
+| `type` | **always**, literal `"analog_fm"` | Routes the line around every Remote ID path: never raises the no-GPS drone popup or webhook, no drone/pilot markers, 30 s stale timeout |
 | `mac` | **always** | Tracking key: `AF:00:` + frequency (big-endian MHz) + band ASCII + channel |
 | `node_id` | **always** | Finds the station position; must equal the Meshtastic node name |
-| `freq_mhz`, `band`, `ch` | **always** | Popup, log, CoT callsign, frequency-derived path loss, emitter clustering within 20 MHz |
+| `freq_mhz`, `band`, `ch` | **always** | Popup, log, frequency-derived path loss, emitter clustering (a cluster never spans 15 MHz) |
 | `rssi_raw`, `rssi` | USB | Raw ADC count; mapper fallback only |
 | `rssi_dbm` | **always** | Calibrated power on the strongest sector. Ring radius, ring colour (green ≥ −60, amber ≥ −75), and the multi-station solver |
 | `rssi_mv`, `rssi_min`, `rssi_max`, `rssi_n` | USB | Calibration reading and sample spread |
 | `receiver`, `hw` | USB | Driver and hardware revision |
 | `sectors`, `sector` | USB | dBm on each of the four sectors, and which was strongest |
-| `bearing_deg`, `bearing_sigma_deg` | **always** | Bearing from true north and its 1σ. *Mapper: next change* |
+| `bearing_deg`, `bearing_sigma_deg` | **always** | Bearing from true north and its 1σ. A residual in the mapper's position solver: two stations with bearings produce a fix where two without cannot |
 | `freq_peak` | when measured | Carrier centre from the fine-tune sweep |
 | `video`, `sync_hz`, `field_hz`, `sync_q` | when measured | `NTSC`, `PAL` or `none`; measured line and field rates; quality 0–100 |
-| `fp` | when video present | `<standard>/<line_hz>/<freq_peak>` — the per-drone fingerprint. *Mapper: next change* |
+| `fp` | when video present | `<standard>/<line_hz>/<freq_peak>` — the per-drone fingerprint. A second clustering key in the mapper, compared with tolerances; it is what tells two drones on one channel apart |
 | `basic_id` | USB *(backfilled)* | Human-readable label |
 | `seq` | **always** | 16-bit report counter, for spotting mesh loss |
 
@@ -450,14 +450,14 @@ The same hit goes to the Heltec as one compact JSON line, `\n`-terminated with n
 CR, at most every `MESH_REPORT_INTERVAL_MS`:
 
 ```json
-{"type":"analog_fm","mac":"AF:00:16:6C:52:03","freq_mhz":5732,"band":"R","ch":3,"rssi_dbm":-68.1,"bearing_deg":32,"bearing_sigma_deg":15,"fp":"NTSC/15736/5734","node_id":"RX01","seq":42}
+{"type":"analog_fm","mac":"AF:00:16:64:52:03","freq_mhz":5732,"band":"R","ch":3,"rssi_dbm":-68.1,"bearing_deg":32,"bearing_sigma_deg":15,"fp":"NTSC/15736/5734","node_id":"RX01","seq":42}
 ```
 
 It **must be JSON** — the home node forwards JSON unchanged (Level 1 lines bypass
 its MAC dedup) and drops anything else — and it **must stay under 200 bytes**. The
 firmware guarantees that by dropping optional groups from the tail if needed:
 first the fingerprint, then the bearing. `"video":"none"` replaces `fp` when video
-was measured and absent. The mapper backfills `rssi`, `basic_id` and `receiver`.
+was measured and absent. The mapper backfills `basic_id` and `receiver`.
 Worst case with a 4-character `NODE_ID` is 191 bytes; every extra character of
 `NODE_ID` costs one.
 
@@ -477,10 +477,11 @@ The mesh copy carries `node_id`, `receiver`, `hw`, `heading`, `threshold_dbm`,
 
 ### What the mapper does with several stations
 
-When two or more positioned stations report the same emitter (clustered by
-frequency within 20 MHz) inside the fusion window, the mapper solves for the
-emitter position **and** its unknown transmitter power from the differences in
-`rssi_dbm`, adds the "not within range of here" constraint from every
+When two or more positioned stations report the same emitter (grouped by
+frequency, never across a 15 MHz span, and by video fingerprint) inside the fusion
+window, the mapper solves for the emitter position **and** its unknown transmitter
+power from the differences in `rssi_dbm`, uses every reported bearing as a further
+constraint, adds the "not within range of here" constraint from every
 alive-but-silent station, and publishes a fix with a 90 % confidence circle.
 
 | Endpoint on `main` | Gives you |
@@ -489,8 +490,7 @@ alive-but-silent station, and publishes a fix with a 90 % confidence circle.
 | `GET /api/analog_nodes` | Every Level 1 station heard: alive, threshold, temperature, position |
 | `GET`/`POST` `/api/analog_fusion` | Read or tune the solver live |
 
-Fixes go to ATAK/WinTAK as CoT. `mapper_test/analog_fusion_test.py` on `main`
-exercises the path offline.
+`mapper_test/analog_fusion_test.py` on `main` exercises the path offline.
 
 ---
 
@@ -499,8 +499,8 @@ exercises the path offline.
 | Next | What it adds | Status |
 |---|---|---|
 | **Bench validation of v2** | Switch truth table, sync separator on a real VTX, RSSI and bearing calibration, C5 pin map | 📋 Procedure in the [bench guide](docs/Level1-Station-v2-Bench-Guide.pdf) |
-| **Mapper consumes v2 keys** (`main`) | Bearing residuals in the solver so two stations triangulate with no power assumption; `fp` as a second clustering key; bearing lines and video badges in the UI | 📋 Next `main` change |
-| **[RX3364 3.3 GHz receiver](docs/RX3364-INTEGRATION-PLAN.md)** | Long-range analog FPV has moved much traffic to 3.3 GHz. Drops in behind `analog_receiver.h` | 📋 Blocked on gate 0 bench characterisation |
+| **Mapper consumes v2 keys** (`main`) | Bearing residuals in the solver so two stations triangulate with no power assumption; `fp` as a second clustering key; bearing lines and video badges in the UI | ✅ Solver and clustering on `main` (PR #19); UI bearing lines and video badges not yet |
+| **[RX3364 3.3 GHz receiver](docs/RX3364-INTEGRATION-PLAN.md)** | Long-range analog FPV has moved much traffic to 3.3 GHz. Drops in behind `analog_receiver.h` | ⏸️ Shelved: Level 1 development is focused on C5-based 5.8 GHz ([`level1-c5phy`](https://github.com/tsuinami-r1/drone-mesh-5plus/tree/level1-c5phy)) |
 
 ---
 

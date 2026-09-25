@@ -1,6 +1,13 @@
 # RX3364 (3.3 GHz) integration plan — Level 1 stations
 
-Status: **planning**. No RX3364 code exists yet. This document is the spec the
+Status: **shelved** (September 2026). Level 1 development is focused on C5-based
+5.8 GHz (the `level1-c5phy` branch), so no RX3364 work is planned. This document is
+kept for reference if the idea is revived; it describes the state of the project when
+it was written. Since then `mesh-mapper.py` on `main` has taken on the §5.2 mapper
+edits (frequency-derived path loss, `rssi_dbm` first, receiver-aware labels), and
+PR #21 removes TAK/CoT output and the `_skip_faa` flag from it.
+
+Original status: **planning**. No RX3364 code exists yet. This document is the spec the
 driver work will be done against; the bench results from Gate 0 get recorded in
 [§9](#9-bench-log) before any driver code lands.
 
